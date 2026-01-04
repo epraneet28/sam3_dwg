@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  sam3-segmenter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sam3-drawing-segmenter:latest
+    container_name: sam3-segmenter
+    ports:
+      - "8001:8001"
+    environment:
+      - SAM3_MODEL_PATH=/app/models/sam3.pt
+      - SAM3_DEFAULT_CONFIDENCE_THRESHOLD=0.3
+      - SAM3_EXEMPLARS_DIR=/app/exemplars
+      - SAM3_LOG_LEVEL=INFO
+      - SAM3_CORS_ORIGINS=["http://localhost:3000", "http://localhost:3005", "http://localhost:3006", "http://localhost:3007", "http://localhost:8000"]
+    volumes:
+      # Mount model weights from host
+      - ./models:/app/models:ro
+      # Mount exemplars directory (read-write for uploads)
+      - ./exemplars:/app/exemplars
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Development mode with hot reload
+  sam3-segmenter-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sam3-segmenter-dev
+    profiles:
+      - dev
+    ports:
+      - "8001:8001"
+    environment:
+      - SAM3_MODEL_PATH=/app/models/sam3.pt
+      - SAM3_DEFAULT_CONFIDENCE_THRESHOLD=0.3
+      - SAM3_LOG_LEVEL=DEBUG
+    volumes:
+      - ./models:/app/models:ro
+      - ./exemplars:/app/exemplars
+      - ./src:/app/src:ro  # Mount source for development
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["python", "-m", "uvicorn", "src.sam3_segmenter.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
+
+networks:
+  default:
+    name: sam3-network

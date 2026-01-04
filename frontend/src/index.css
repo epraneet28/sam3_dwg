@@ -1,0 +1,136 @@
+@import "tailwindcss";
+
+/* Custom theme colors */
+@theme {
+  --color-bg-primary: #0f172a;
+  --color-bg-secondary: #1e293b;
+  --color-bg-tertiary: #334155;
+
+  /* Stage colors */
+  --color-stage-pdf: #8b5cf6;
+  --color-stage-layout: #3b82f6;
+  --color-stage-label: #f59e0b;
+  --color-stage-reading: #10b981;
+  --color-stage-corrected: #06b6d4;
+  --color-stage-final: #22c55e;
+
+  /* Compact UI sizing */
+  --text-compact: 11px;
+  --height-compact: 24px;
+}
+
+/* Prevent iOS zoom on input focus - only for main form inputs */
+input:not(.compact-input),
+select:not(.compact-select),
+textarea {
+  font-size: 16px;
+}
+
+/* Compact form elements - for dense UI areas like toolbars */
+.compact-input,
+.compact-select,
+.compact-btn,
+.compact-text {
+  font-size: var(--text-compact) !important;
+  line-height: 1.25;
+}
+
+.compact-select {
+  appearance: none;
+  background-image: url('data:image/svg+xml;charset=utf-8,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="%2394a3b8"%3E%3Cpath fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"/%3E%3C/svg%3E');
+  background-size: 14px 14px;
+  background-position: right 4px center;
+  background-repeat: no-repeat;
+  padding-right: 20px;
+  cursor: pointer;
+}
+
+/* Compact text - for labels in dense UI */
+.compact-text {
+  height: auto;
+  line-height: 1.5;
+}
+
+/* ===========================================
+   STANDARDIZED UI COMPONENT STYLES
+   =========================================== */
+
+/* Note: Panel/widget styles (floatingSidebar, floatingWidget, modal, card)
+   are now centralized in constants/colors.ts as CONTAINER_STYLES.
+   Use getContainerClasses() or direct CONTAINER_STYLES imports for consistency. */
+
+/* Badge styles - standardized */
+.badge {
+  @apply text-xs font-medium px-1.5 py-0.5 rounded;
+}
+
+.badge-sm {
+  @apply text-xs font-medium px-1.5 py-0.5 rounded;
+}
+
+.badge-md {
+  @apply text-xs font-medium px-2 py-0.5 rounded;
+}
+
+.badge-lg {
+  @apply text-xs font-medium px-2 py-1 rounded-md;
+}
+
+/* Icon button sizes - standardized */
+.icon-btn-sm {
+  @apply p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors;
+}
+
+.icon-btn-md {
+  @apply p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors;
+}
+
+.icon-btn-lg {
+  @apply p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors;
+}
+
+/* List item styles */
+.list-item {
+  @apply p-2 rounded-lg cursor-pointer transition-colors bg-slate-700/50 hover:bg-slate-700;
+}
+
+.list-item-selected {
+  @apply bg-slate-600 ring-1 ring-blue-500;
+}
+
+.list-item-modified {
+  @apply ring-1 ring-amber-500/50;
+}
+
+/* Custom scrollbar */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #475569 #1e293b;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 4px;
+}
+
+/* Dark mode base */
+html {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-slate-900 text-slate-200 min-h-screen;
+  margin: 0;
+}
+
+#root {
+  min-height: 100vh;
+}

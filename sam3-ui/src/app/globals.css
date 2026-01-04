@@ -1,0 +1,169 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/**
+ * SAM3 Drawing Zone Segmenter - Dark Theme
+ * Based on docling-interactive UI design system
+ * Using slate color palette for professional dark aesthetic
+ */
+
+@theme {
+  /* Primary dark backgrounds - from docling-interactive */
+  --color-bg-primary: #0f172a;      /* slate-900 - main background */
+  --color-bg-secondary: #1e293b;    /* slate-800 - card backgrounds */
+  --color-bg-tertiary: #334155;     /* slate-700 - elevated elements */
+
+  /* Zone type colors optimized for dark backgrounds */
+  --color-zone-title: #60a5fa;      /* blue-400 - title blocks */
+  --color-zone-revision: #c084fc;   /* purple-400 - revision blocks */
+  --color-zone-plan: #4ade80;       /* green-400 - plan views */
+  --color-zone-elevation: #facc15;  /* yellow-400 - elevation views */
+  --color-zone-section: #fb923c;    /* orange-400 - section views */
+  --color-zone-detail: #f87171;     /* red-400 - detail views */
+  --color-zone-schedule: #f472b6;   /* pink-400 - schedule tables */
+  --color-zone-notes: #818cf8;      /* indigo-400 - notes areas */
+  --color-zone-legend: #22d3ee;     /* cyan-400 - legends */
+  --color-zone-grid: #2dd4bf;       /* teal-400 - grid systems */
+  --color-zone-unknown: #9ca3af;    /* gray-400 - unknown zones */
+
+  /* Status colors */
+  --color-success: #22c55e;         /* green-500 - success states */
+  --color-warning: #f59e0b;         /* amber-500 - warnings */
+  --color-error: #ef4444;           /* red-500 - errors */
+  --color-info: #3b82f6;            /* blue-500 - info messages */
+
+  /* Compact UI sizing */
+  --text-compact: 11px;
+  --height-compact: 24px;
+
+  /* Border radius */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+}
+
+/* Force dark theme as default */
+:root {
+  color-scheme: dark;
+}
+
+/* Prevent iOS zoom on input focus */
+input:not(.compact-input),
+select:not(.compact-select),
+textarea {
+  font-size: 16px;
+}
+
+/* Compact form elements for dense UI */
+.compact-input,
+.compact-select,
+.compact-btn,
+.compact-text {
+  font-size: var(--text-compact) !important;
+  line-height: 1.25;
+}
+
+/* Compact select with custom arrow */
+.compact-select {
+  appearance: none;
+  background-image: url('data:image/svg+xml;charset=utf-8,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="%2394a3b8"%3E%3Cpath fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"/%3E%3C/svg%3E');
+  background-size: 14px 14px;
+  background-position: right 4px center;
+  background-repeat: no-repeat;
+  padding-right: 20px;
+  cursor: pointer;
+}
+
+/* Custom scrollbar for dark theme */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #475569 #1e293b;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: #1e293b;
+  border-radius: 4px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 4px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Base styles */
+@layer base {
+  * {
+    @apply border-slate-700;
+  }
+
+  body {
+    @apply bg-slate-900 text-slate-200 min-h-screen antialiased;
+    margin: 0;
+  }
+
+  #root {
+    min-height: 100vh;
+  }
+}
+
+/* Utility classes */
+@layer utilities {
+  /* Card container style - matching docling-interactive */
+  .card-dark {
+    @apply bg-slate-800/80 rounded-xl shadow-lg ring-1 ring-white/10;
+  }
+
+  /* Button hover states */
+  .btn-hover-dark {
+    @apply transition-colors hover:bg-slate-700/50;
+  }
+
+  /* Icon button sizes */
+  .icon-btn-sm {
+    @apply p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors;
+  }
+
+  .icon-btn-md {
+    @apply p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors;
+  }
+
+  .icon-btn-lg {
+    @apply p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors;
+  }
+
+  /* List item styles */
+  .list-item {
+    @apply p-2 rounded-lg cursor-pointer transition-colors bg-slate-700/50 hover:bg-slate-700;
+  }
+
+  .list-item-selected {
+    @apply bg-slate-600 ring-1 ring-blue-400;
+  }
+
+  .list-item-hover {
+    @apply bg-slate-100 border-slate-400;
+  }
+
+  /* Badge utility classes */
+  .badge-sm {
+    @apply text-xs font-medium px-1.5 py-0.5 rounded;
+  }
+
+  .badge-md {
+    @apply text-xs font-medium px-2 py-0.5 rounded;
+  }
+
+  .badge-lg {
+    @apply text-xs font-medium px-2 py-1 rounded-md;
+  }
+}

@@ -1,0 +1,72 @@
+[project]
+name = "sam3-drawing-segmenter"
+version = "1.0.0"
+description = "SAM3-based zone segmentation service for engineering drawings"
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "MIT"}
+
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    # Meta SAM3 dependencies (MIT License - permissive)
+    "timm>=1.0.17",
+    "numpy>=1.26,<2",  # SAM3 requires numpy<2
+    "tqdm",
+    "ftfy==6.1.1",
+    "regex",
+    "iopath>=0.1.10",
+    "typing_extensions",
+    "huggingface_hub",
+    "einops",  # Required for SAM3
+    "decord",  # Required for video support
+    "pycocotools",  # Required for evaluation
+    # Deep learning frameworks
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    # Image processing
+    "pillow>=10.0.0",
+    "opencv-python>=4.8.0,<4.10.0",  # Must be <4.10 for numpy<2 compatibility
+    # API dependencies
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-multipart>=0.0.6",
+    "httpx>=0.25.0",
+    # Database dependencies
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_ignores = true
