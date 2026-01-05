@@ -7,7 +7,6 @@ import type {
   SegmentRequest,
   SegmentResponse,
   HealthResponse,
-  SAM3Document,
   UploadDocumentResponse,
   SegmentDocumentResponse,
   SegmentDocumentRequest,
@@ -15,6 +14,9 @@ import type {
   PromptConfigUpdateRequest,
   InteractiveSegmentResponse,
   PointPromptLabel,
+  DocumentMetadata,
+  DocumentListResponse,
+  DocumentDetailResponse,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001';
@@ -127,13 +129,16 @@ export const api = {
 
   /**
    * Combined interactive segmentation with points, box, and/or mask input (for Playground)
+   * Supports both single box and multi-box modes.
    */
   async segmentInteractive(
     imageBase64: string,
     options: {
       points?: Array<{ x: number; y: number; label: PointPromptLabel }>;
-      box?: [number, number, number, number];
-      maskInput?: string; // Base64 encoded mask for refinement
+      box?: [number, number, number, number]; // Single box (backwards compatible)
+      boxes?: Array<[number, number, number, number]>; // Multi-box (merged into single mask)
+      maskInput?: string; // Base64 encoded binarized mask (legacy mode)
+      maskLogits?: string; // Base64 encoded low-res logits (preferred for refinement)
     }
   ): Promise<InteractiveSegmentResponse> {
     const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
@@ -142,94 +147,101 @@ export const api = {
       image_base64: base64Data,
       points: options.points?.map((p) => ({ x: p.x, y: p.y, label: p.label })),
       box: options.box,
-      mask_input_base64: options.maskInput,
+      boxes: options.boxes,
+      // Prefer logits over binarized mask for higher quality refinement
+      mask_logits_base64: options.maskLogits,
+      mask_input_base64: options.maskLogits ? undefined : options.maskInput,
       multimask_output: true,
     });
     return data;
   },
 
   // ============================================================================
-  // Document Management (MOCK - Backend endpoints not implemented yet)
+  // Document Management (File-based backend storage)
   // ============================================================================
 
   /**
-   * Upload a document (PDF or image)
-   * TODO: Backend needs to implement POST /documents/upload
-   * Mock: Stores file as base64 in localStorage, generates mock docId
+   * Upload a document (image file) to backend storage.
+   * The file is stored in the server's storage directory.
    */
   async uploadDocument(file: File): Promise<UploadDocumentResponse> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
+    const formData = new FormData();
+    formData.append('file', file);
 
-      reader.onloadend = () => {
-        const docId = `doc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const base64 = reader.result as string;
-
-        // Store in localStorage temporarily
-        localStorage.setItem(`sam3_doc_${docId}`, base64);
-        localStorage.setItem(`sam3_doc_${docId}_name`, file.name);
-
-        // For now, treat single image as 1-page document
-        // TODO: Backend should extract pages from PDF
-        resolve({
-          docId,
-          totalPages: 1,
-        });
-      };
-
-      reader.onerror = () => {
-        reject(new Error('Failed to read file'));
-      };
-
-      reader.readAsDataURL(file);
+    const { data } = await apiClient.post<{
+      doc_id: string;
+      filename: string;
+      original_filename: string | null;
+      total_pages: number;
+      file_size_bytes: number | null;
+      image_width: number | null;
+      image_height: number | null;
+    }>('/documents/upload', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+      timeout: 120000, // 2 minute timeout for large files
     });
+
+    // Map backend response to frontend interface
+    return {
+      docId: data.doc_id,
+      totalPages: data.total_pages,
+      doc_id: data.doc_id,
+      filename: data.filename,
+      original_filename: data.original_filename,
+      file_size_bytes: data.file_size_bytes,
+      image_width: data.image_width,
+      image_height: data.image_height,
+    };
   },
 
   /**
-   * List all documents
-   * TODO: Backend needs to implement GET /documents
-   * Mock: Returns empty array (documents managed in Zustand store)
+   * List all documents from backend storage.
    */
-  async listDocuments(): Promise<SAM3Document[]> {
-    // Documents are managed client-side in Zustand store for now
-    return [];
+  async listDocuments(): Promise<DocumentMetadata[]> {
+    const { data } = await apiClient.get<DocumentListResponse>('/documents');
+    return data.documents;
   },
 
   /**
-   * Get a specific document
-   * TODO: Backend needs to implement GET /documents/{docId}
-   * Mock: Returns from Zustand store
+   * Get a specific document's metadata and optionally its image.
    */
-  async getDocument(docId: string): Promise<SAM3Document> {
-    throw new Error(`Document ${docId} not found - backend not implemented`);
+  async getDocument(docId: string, includeImage = false): Promise<DocumentDetailResponse> {
+    const { data } = await apiClient.get<DocumentDetailResponse>(
+      `/documents/${docId}`,
+      { params: { include_image: includeImage } }
+    );
+    return data;
   },
 
   /**
-   * Delete a document
-   * TODO: Backend needs to implement DELETE /documents/{docId}
-   * Mock: Removes from localStorage
+   * Delete a document from backend storage.
    */
   async deleteDocument(docId: string): Promise<void> {
-    localStorage.removeItem(`sam3_doc_${docId}`);
-    localStorage.removeItem(`sam3_doc_${docId}_name`);
+    await apiClient.delete(`/documents/${docId}`);
   },
 
   /**
-   * Segment all pages of a document
-   * TODO: Backend needs to implement POST /documents/{docId}/segment
-   * Mock: Uses existing /segment/structural endpoint for single image
+   * Get document image as base64.
+   */
+  async getDocumentImage(docId: string): Promise<string> {
+    const { data } = await apiClient.get<{ image_base64: string }>(
+      `/documents/${docId}/image`
+    );
+    return data.image_base64;
+  },
+
+  /**
+   * Segment all pages of a document.
+   * Fetches image from backend, then segments using structural endpoint.
    */
   async segmentDocument(
     docId: string,
     _options?: SegmentDocumentRequest
   ): Promise<SegmentDocumentResponse> {
-    const base64 = localStorage.getItem(`sam3_doc_${docId}`);
-    if (!base64) {
-      throw new Error(`Document ${docId} not found`);
-    }
-
-    // Extract base64 data (remove data:image/...;base64, prefix)
-    const imageBase64 = base64.split(',')[1];
+    // Fetch image from backend storage
+    const imageBase64 = await api.getDocumentImage(docId);
 
     // Segment using existing endpoint - masks enabled for visualization
     const result = await api.segmentStructural({
@@ -245,7 +257,7 @@ export const api = {
         {
           pageNumber: 0,
           zones: result.zones,
-          pageType: null, // Page classification removed
+          pageType: null,
           processingTimeMs: result.processing_time_ms,
         },
       ],
@@ -253,13 +265,95 @@ export const api = {
   },
 
   /**
-   * Get URL for a page image
-   * TODO: Backend needs to implement GET /documents/{docId}/pages/{pageNumber}/image
-   * Mock: Returns data URL from localStorage
+   * Get image URL/data for a page.
+   * Now fetches from backend storage.
    */
-  getPageImageUrl(docId: string, _pageNumber: number): string {
-    const base64 = localStorage.getItem(`sam3_doc_${docId}`);
-    return base64 || '';
+  async getPageImageUrl(docId: string, _pageNumber: number): Promise<string> {
+    const imageBase64 = await api.getDocumentImage(docId);
+    // Return as data URL for compatibility with existing code
+    return `data:image/png;base64,${imageBase64}`;
+  },
+
+  // ============================================================================
+  // Viewer Zone Storage
+  // ============================================================================
+
+  /**
+   * Save viewer zones (auto-run segmentation results) for a document.
+   */
+  async saveViewerZones(
+    docId: string,
+    zonesData: { zones: unknown[]; processing_time_ms?: number }
+  ): Promise<{ message: string; doc_id: string }> {
+    const { data } = await apiClient.post(`/documents/${docId}/viewer/zones`, zonesData);
+    return data;
+  },
+
+  /**
+   * Get viewer zones for a document.
+   */
+  async getViewerZones(docId: string): Promise<{
+    zones: unknown[] | null;
+    saved_at: string | null;
+    processing_time_ms?: number;
+  }> {
+    const { data } = await apiClient.get(`/documents/${docId}/viewer/zones`);
+    return data;
+  },
+
+  // ============================================================================
+  // Playground Session Storage
+  // ============================================================================
+
+  /**
+   * Save a playground session snapshot.
+   */
+  async savePlaygroundSession(
+    docId: string,
+    sessionId: string,
+    sessionData: Record<string, unknown>
+  ): Promise<{ message: string; doc_id: string; session_id: string }> {
+    const { data } = await apiClient.post(
+      `/documents/${docId}/playground/sessions/${sessionId}`,
+      sessionData
+    );
+    return data;
+  },
+
+  /**
+   * List all playground sessions for a document.
+   */
+  async listPlaygroundSessions(docId: string): Promise<{
+    sessions: Array<{ session_id: string; saved_at: string | null }>;
+    count: number;
+  }> {
+    const { data } = await apiClient.get(`/documents/${docId}/playground/sessions`);
+    return data;
+  },
+
+  /**
+   * Get a specific playground session.
+   */
+  async getPlaygroundSession(
+    docId: string,
+    sessionId: string
+  ): Promise<Record<string, unknown>> {
+    const { data } = await apiClient.get(
+      `/documents/${docId}/playground/sessions/${sessionId}`
+    );
+    return data;
+  },
+
+  // ============================================================================
+  // Storage Migration (Admin)
+  // ============================================================================
+
+  /**
+   * Migrate from flat storage to folder-based structure.
+   */
+  async migrateStorage(): Promise<{ message: string; migrated_documents: number }> {
+    const { data } = await apiClient.post('/admin/migrate-storage');
+    return data;
   },
 };
 

@@ -22,7 +22,11 @@ import type {
   PointPromptMode,
   PointPromptLabel,
   MaskCandidate,
+  PolygonData,
+  SmartSelectOutputMode,
+  SmartSelectState,
 } from '../../types';
+import { isPointInMask } from '../../utils/polygonExtraction';
 
 type InputMode = 'text' | 'points' | 'box';
 
@@ -60,6 +64,14 @@ interface PlaygroundCanvasProps {
   // Mask result (optional - shown after segmentation)
   selectedMask?: MaskCandidate | null;
 
+  // Smart Select features
+  displayMode?: SmartSelectOutputMode;
+  polygon?: PolygonData | null;
+
+  // Refinement mode (click inside/outside mask to add/remove)
+  selectState?: SmartSelectState;
+  onRefinementClick?: (point: PointPrompt, isInsideMask: boolean) => void;
+
   // Pass-through handlers
   onPanStart: (e: React.MouseEvent) => void;
   onPanMove: (e: React.MouseEvent) => void;
@@ -91,6 +103,10 @@ export function PlaygroundCanvas({
   onAddBox,
   onRemoveBox,
   selectedMask,
+  displayMode = 'pixels',
+  polygon = null,
+  selectState = 'idle',
+  onRefinementClick,
   onPanStart,
   onPanMove,
   onPanEnd,
@@ -136,25 +152,54 @@ export function PlaygroundCanvas({
     [containerRef, imageDimensions, pan, zoom]
   );
 
-  // Handle canvas click - intercept for point placement
+  // Handle canvas click - intercept for point placement and refinement
   const handleCanvasClick = useCallback(
-    (e: React.MouseEvent) => {
+    async (e: React.MouseEvent) => {
       if (isPanning || isDrawingBox.current) return;
 
-      if (inputMode === 'points') {
-        const coords = getImageCoords(e);
-        if (!coords) return;
+      const coords = getImageCoords(e);
+      if (!coords || !imageDimensions) return;
 
-        // Check if click is within image bounds
-        if (
-          coords.x < 0 ||
-          coords.x > imageDimensions!.width ||
-          coords.y < 0 ||
-          coords.y > imageDimensions!.height
-        ) {
-          return;
+      // Check if click is within image bounds
+      if (
+        coords.x < 0 ||
+        coords.x > imageDimensions.width ||
+        coords.y < 0 ||
+        coords.y > imageDimensions.height
+      ) {
+        return;
+      }
+
+      // Check if we're in refinement mode (have a mask and state is initial/refining)
+      const inRefinementMode = selectedMask?.mask_base64 &&
+        (selectState === 'initial' || selectState === 'refining') &&
+        onRefinementClick;
+
+      if (inRefinementMode) {
+        // Determine if click is inside or outside the mask
+        try {
+          const isInside = await isPointInMask(coords, selectedMask.mask_base64);
+
+          // Create point with appropriate label
+          // Inside mask = negative (remove), Outside mask = positive (add)
+          const label: PointPromptLabel = isInside ? 0 : 1;
+          const newPoint: PointPrompt = {
+            id: generatePromptId('point'),
+            x: coords.x,
+            y: coords.y,
+            label,
+          };
+
+          onRefinementClick(newPoint, isInside);
+        } catch (err) {
+          console.error('Failed to check point in mask:', err);
+          // Fall back to regular point mode behavior
         }
+        return;
+      }
 
+      // Regular point mode
+      if (inputMode === 'points') {
         const label: PointPromptLabel = pointPromptMode === 'positive' ? 1 : 0;
         const newPoint: PointPrompt = {
           id: generatePromptId('point'),
@@ -174,6 +219,9 @@ export function PlaygroundCanvas({
       getImageCoords,
       imageDimensions,
       onAddPoint,
+      selectedMask,
+      selectState,
+      onRefinementClick,
     ]
   );
 
@@ -253,7 +301,7 @@ export function PlaygroundCanvas({
         return;
       }
 
-      if (isDrawingBox.current && activeBox) {
+      if (isDrawingBox.current && activeBox && imageDimensions) {
         isDrawingBox.current = false;
 
         // Only create box if it has meaningful size
@@ -261,12 +309,14 @@ export function PlaygroundCanvas({
         const height = Math.abs(activeBox.currentY - activeBox.startY);
 
         if (width > 10 && height > 10) {
+          // Clamp box coordinates to image bounds (fixes potential offset issues)
+          const clamp = (val: number, min: number, max: number) => Math.max(min, Math.min(val, max));
           const newBox: BoxPrompt = {
             id: generatePromptId('box'),
-            x1: Math.min(activeBox.startX, activeBox.currentX),
-            y1: Math.min(activeBox.startY, activeBox.currentY),
-            x2: Math.max(activeBox.startX, activeBox.currentX),
-            y2: Math.max(activeBox.startY, activeBox.currentY),
+            x1: clamp(Math.min(activeBox.startX, activeBox.currentX), 0, imageDimensions.width),
+            y1: clamp(Math.min(activeBox.startY, activeBox.currentY), 0, imageDimensions.height),
+            x2: clamp(Math.max(activeBox.startX, activeBox.currentX), 0, imageDimensions.width),
+            y2: clamp(Math.max(activeBox.startY, activeBox.currentY), 0, imageDimensions.height),
           };
 
           onAddBox(newBox);
@@ -275,7 +325,7 @@ export function PlaygroundCanvas({
         setActiveBox(null);
       }
     },
-    [isPanning, activeBox, onPanEnd, onAddBox]
+    [isPanning, activeBox, onPanEnd, onAddBox, imageDimensions]
   );
 
   // Cursor style based on mode
@@ -336,6 +386,7 @@ export function PlaygroundCanvas({
               imageDimensions={imageDimensions}
               zoom={zoom}
               pan={pan}
+              containerRef={containerRef}
               pointMode={pointPromptMode}
               onPointRemove={onRemovePoint}
             />
@@ -349,6 +400,7 @@ export function PlaygroundCanvas({
               imageDimensions={imageDimensions}
               zoom={zoom}
               pan={pan}
+              containerRef={containerRef}
               onBoxRemove={onRemoveBox}
             />
           )}
@@ -360,13 +412,16 @@ export function PlaygroundCanvas({
               imageDimensions={imageDimensions}
               zoom={zoom}
               pan={pan}
+              containerRef={containerRef}
+              displayMode={displayMode}
+              polygon={polygon}
             />
           )}
         </>
       )}
 
-      {/* Click area overlay for points mode to capture clicks above canvas */}
-      {inputMode === 'points' && imageDimensions && (
+      {/* Click area overlay for interactive modes to capture clicks for points and refinement */}
+      {imageDimensions && (inputMode === 'points' || (inputMode === 'box' && selectedMask?.mask_base64)) && (
         <div
           className="absolute inset-0"
           onClick={handleCanvasClick}

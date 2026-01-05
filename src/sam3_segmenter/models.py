@@ -344,6 +344,10 @@ class InteractiveSegmentRequest(BaseModel):
 
     This uses SAM3's Promptable Visual Segmentation (PVS) capability for
     instance-specific segmentation at specified locations.
+
+    Supports both single box and multi-box modes:
+    - Single box: Use `box` field for one bounding box
+    - Multi-box: Use `boxes` field for multiple bounding boxes (masks are merged)
     """
 
     image_base64: str = Field(..., description="Base64 encoded image")
@@ -351,14 +355,27 @@ class InteractiveSegmentRequest(BaseModel):
         None, description="Point prompts (click locations)"
     )
     box: Optional[tuple[float, float, float, float]] = Field(
-        None, description="Bounding box [x1, y1, x2, y2] in image coordinates"
+        None, description="Single bounding box [x1, y1, x2, y2] in image coordinates"
+    )
+    boxes: Optional[list[tuple[float, float, float, float]]] = Field(
+        None, description="Multiple bounding boxes [[x1, y1, x2, y2], ...] for multi-box segmentation"
     )
     mask_input_base64: Optional[str] = Field(
         None,
-        description="Base64 encoded binary mask to refine (from previous segmentation)",
+        description="Base64 encoded binary mask to refine (from previous segmentation). "
+                    "For best refinement quality, use mask_logits_base64 instead.",
+    )
+    mask_logits_base64: Optional[str] = Field(
+        None,
+        description="Base64 encoded low-resolution logits (numpy .npy format) for refinement. "
+                    "Use low_res_logits_base64 from previous response for optimal quality.",
     )
     multimask_output: bool = Field(
         True, description="Return multiple mask candidates with IOU scores"
+    )
+    doc_id: Optional[str] = Field(
+        None,
+        description="Document ID for saving debug logs to document storage directory",
     )
 
 
@@ -369,6 +386,11 @@ class MaskCandidate(BaseModel):
     iou_score: float = Field(..., description="Predicted IOU score for this mask")
     bbox: tuple[float, float, float, float] = Field(
         ..., description="Bounding box [x1, y1, x2, y2] of the mask"
+    )
+    low_res_logits_base64: Optional[str] = Field(
+        None,
+        description="Base64 encoded low-resolution logits (256x256 float32) for refinement. "
+                    "Use this instead of mask_base64 for mask_input in subsequent calls."
     )
 
 
@@ -382,3 +404,48 @@ class InteractiveSegmentResponse(BaseModel):
     masks: list[MaskCandidate] = Field(..., description="Mask candidates sorted by IOU score")
     image_size: tuple[int, int] = Field(..., description="[width, height] of input image")
     processing_time_ms: float = Field(..., description="Processing time in milliseconds")
+
+
+# =============================================================================
+# Document Storage Models (for Playground)
+# =============================================================================
+
+
+class DocumentUploadResponse(BaseModel):
+    """Response for document upload."""
+
+    doc_id: str = Field(..., description="Unique document identifier")
+    filename: str = Field(..., description="Stored filename")
+    original_filename: Optional[str] = Field(None, description="Original filename")
+    total_pages: int = Field(1, description="Number of pages (for PDF)")
+    file_size_bytes: Optional[int] = Field(None, description="File size in bytes")
+    image_width: Optional[int] = Field(None, description="Image width in pixels")
+    image_height: Optional[int] = Field(None, description="Image height in pixels")
+
+
+class DocumentMetadata(BaseModel):
+    """Document metadata for listing."""
+
+    doc_id: str = Field(..., description="Unique document identifier")
+    filename: str = Field(..., description="Stored filename")
+    original_filename: Optional[str] = Field(None, description="Original filename")
+    upload_date: str = Field(..., description="Upload timestamp (ISO format)")
+    file_size_bytes: Optional[int] = Field(None, description="File size in bytes")
+    image_width: Optional[int] = Field(None, description="Image width in pixels")
+    image_height: Optional[int] = Field(None, description="Image height in pixels")
+    file_format: Optional[str] = Field(None, description="File format (PNG, JPEG)")
+    total_pages: int = Field(1, description="Number of pages")
+
+
+class DocumentListResponse(BaseModel):
+    """Response for listing documents."""
+
+    documents: list[DocumentMetadata] = Field(default_factory=list)
+    total_count: int = Field(..., description="Total number of documents")
+
+
+class DocumentDetailResponse(BaseModel):
+    """Response for document detail with optional image."""
+
+    metadata: DocumentMetadata
+    image_base64: Optional[str] = Field(None, description="Base64 encoded image")

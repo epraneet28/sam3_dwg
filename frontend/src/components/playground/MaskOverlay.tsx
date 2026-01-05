@@ -2,19 +2,32 @@
  * MaskOverlay - SVG/Canvas overlay for displaying segmentation masks
  *
  * Renders the selected mask from interactive segmentation results.
- * The mask is displayed as a semi-transparent colored overlay.
+ * Supports two display modes:
+ * - 'pixels': Semi-transparent colored mask overlay (canvas-based)
+ * - 'polygon': SVG polygon outline with fill
+ *
+ * Uses CSS-constrained dimensions to match the canvas's maxWidth/maxHeight behavior.
  */
 
-import { useEffect, useRef, useState } from 'react';
-import type { MaskCandidate } from '../../types';
+import { useEffect, useRef, useState, useMemo } from 'react';
+import type { MaskCandidate, PolygonData, SmartSelectOutputMode } from '../../types';
+import { polygonToSvgPath } from '../../utils/polygonExtraction';
+import { calculateCssScale } from '../../utils/canvasCoordinates';
 
 interface MaskOverlayProps {
   mask: MaskCandidate | null;
   imageDimensions: { width: number; height: number };
   zoom: number;
   pan: { x: number; y: number };
+  containerRef: React.RefObject<HTMLDivElement>;
   maskColor?: string;
   maskOpacity?: number;
+  /** Display mode: 'pixels' for mask, 'polygon' for SVG outline */
+  displayMode?: SmartSelectOutputMode;
+  /** Polygon data (required when displayMode is 'polygon') */
+  polygon?: PolygonData | null;
+  /** Show polygon vertices as draggable points */
+  showPolygonVertices?: boolean;
 }
 
 export function MaskOverlay({
@@ -22,11 +35,34 @@ export function MaskOverlay({
   imageDimensions,
   zoom,
   pan,
+  containerRef,
   maskColor = '#8b5cf6', // purple-500
   maskOpacity = 0.4,
+  displayMode = 'pixels',
+  polygon = null,
+  showPolygonVertices = true,
 }: MaskOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [maskImage, setMaskImage] = useState<HTMLImageElement | null>(null);
+
+  // Calculate CSS-constrained dimensions to match canvas sizing
+  const { renderedWidth, renderedHeight } = useMemo(() => {
+    if (!containerRef.current) {
+      return { renderedWidth: imageDimensions.width, renderedHeight: imageDimensions.height };
+    }
+    const rect = containerRef.current.getBoundingClientRect();
+    const cssScale = calculateCssScale(rect, imageDimensions);
+    return {
+      renderedWidth: imageDimensions.width * cssScale,
+      renderedHeight: imageDimensions.height * cssScale,
+    };
+  }, [containerRef, imageDimensions]);
+
+  // Generate SVG path for polygon
+  const polygonPath = useMemo(() => {
+    if (!polygon || polygon.points.length < 3) return '';
+    return polygonToSvgPath(polygon.points);
+  }, [polygon]);
 
   // Decode base64 mask to image
   useEffect(() => {
@@ -56,8 +92,16 @@ export function MaskOverlay({
     const canvas = canvasRef.current;
     if (!canvas || !maskImage) return;
 
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
+
+    // Log dimension check for debugging
+    if (maskImage.width !== imageDimensions.width || maskImage.height !== imageDimensions.height) {
+      console.warn(
+        `MaskOverlay: Dimension mismatch! mask=(${maskImage.width}x${maskImage.height}), ` +
+        `image=(${imageDimensions.width}x${imageDimensions.height}). Mask will be resampled.`
+      );
+    }
 
     // Set canvas size to match image dimensions
     canvas.width = imageDimensions.width;
@@ -98,39 +142,111 @@ export function MaskOverlay({
 
   if (!mask) return null;
 
+  // Determine if we should show polygon or pixels
+  const showPolygon = displayMode === 'polygon' && polygon && polygon.points.length >= 3;
+
   return (
     <div
-      className="absolute inset-0 pointer-events-none"
+      className="absolute pointer-events-none"
       style={{
-        width: imageDimensions.width,
-        height: imageDimensions.height,
-        transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+        width: renderedWidth,
+        height: renderedHeight,
+        // Use translate(-50%, -50%) for centering instead of margins
+        // This works correctly when CSS constraints change the rendered size
+        transform: `translate(-50%, -50%) translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
         transformOrigin: 'center center',
         left: '50%',
         top: '50%',
-        marginLeft: -imageDimensions.width / 2,
-        marginTop: -imageDimensions.height / 2,
       }}
     >
-      {/* Mask canvas */}
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0"
-        style={{
-          width: imageDimensions.width,
-          height: imageDimensions.height,
-        }}
-      />
+      {/* Pixels mode: Canvas mask */}
+      {displayMode === 'pixels' && (
+        <canvas
+          ref={canvasRef}
+          className="absolute inset-0"
+          style={{
+            // CSS display size matches container (renderedWidth/renderedHeight)
+            // Canvas internal resolution (canvas.width/height) stays at imageDimensions
+            width: '100%',
+            height: '100%',
+          }}
+        />
+      )}
 
-      {/* Bounding box outline around mask */}
-      {mask.bbox && (
+      {/* Polygon mode: SVG polygon */}
+      {showPolygon && (
         <svg
           className="absolute inset-0"
           viewBox={`0 0 ${imageDimensions.width} ${imageDimensions.height}`}
           preserveAspectRatio="xMidYMid meet"
           style={{
-            width: imageDimensions.width,
-            height: imageDimensions.height,
+            // CSS display size matches container - viewBox handles coordinate scaling
+            width: '100%',
+            height: '100%',
+          }}
+        >
+          {/* Polygon fill */}
+          <path
+            d={polygonPath}
+            fill={maskColor}
+            fillOpacity={maskOpacity}
+            stroke={maskColor}
+            strokeWidth={2 / zoom}
+            strokeLinejoin="round"
+          />
+
+          {/* Polygon vertices */}
+          {showPolygonVertices && polygon.points.map((point, idx) => (
+            <g key={idx}>
+              {/* Vertex circle */}
+              <circle
+                cx={point.x}
+                cy={point.y}
+                r={4 / zoom}
+                fill="white"
+                stroke={maskColor}
+                strokeWidth={1.5 / zoom}
+              />
+              {/* Vertex index (optional, for debugging) */}
+              {polygon.points.length <= 20 && (
+                <text
+                  x={point.x + 6 / zoom}
+                  y={point.y - 6 / zoom}
+                  fontSize={10 / zoom}
+                  fill={maskColor}
+                  fontWeight="500"
+                >
+                  {idx + 1}
+                </text>
+              )}
+            </g>
+          ))}
+
+          {/* Polygon stats */}
+          {mask.bbox && (
+            <text
+              x={mask.bbox[0]}
+              y={mask.bbox[1] - 6 / zoom}
+              fontSize={12 / zoom}
+              fill={maskColor}
+              fontWeight="bold"
+            >
+              {polygon.points.length} pts • IoU: {(mask.iou_score * 100).toFixed(1)}%
+            </text>
+          )}
+        </svg>
+      )}
+
+      {/* Bounding box outline (pixels mode only) */}
+      {displayMode === 'pixels' && mask.bbox && (
+        <svg
+          className="absolute inset-0"
+          viewBox={`0 0 ${imageDimensions.width} ${imageDimensions.height}`}
+          preserveAspectRatio="xMidYMid meet"
+          style={{
+            // CSS display size matches container - viewBox handles coordinate scaling
+            width: '100%',
+            height: '100%',
           }}
         >
           <rect

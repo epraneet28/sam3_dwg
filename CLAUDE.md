@@ -64,7 +64,7 @@ curl http://localhost:8001/health
 
 ## Development Without GPU
 
-Service auto-uses `MockSAM3Model` if GPU/model unavailable. Allows API development and testing without ML inference.
+SAM3 model is required for the service to function. If SAM3 is not installed or the model file is missing, the service will raise an error at startup. Install SAM3 with: `cd sam3_reference && pip install -e .`
 
 ---
 
@@ -192,7 +192,7 @@ await handler(doc_id, request=options)  # → request gets options ✓
 ## Testing Best Practices
 
 - **Hard assertions only** - tests must fail when wrong
-- **Mock model for unit tests**: Use `MockSAM3Model` (no GPU required)
+- **SAM3 required**: Real SAM3 model must be installed for integration tests
 - **Test fixtures**: `client`, `sample_image_base64` in `conftest.py`
 - **ML testing**: Test confidence boundaries, synthetic images, schema validation
 - **Batch testing**: Mix success/failure scenarios
@@ -367,7 +367,7 @@ docker-compose logs -f sam3-segmenter                   # View logs
 
 - **Model not found**: `python scripts/download_model.py`
 - **SAM3 import error**: Install official Meta SAM3: `cd sam3_reference && pip install -e .`
-- **Uses MockSAM3Model**: Check model file exists, verify `SAM3_MODEL_PATH`
+- **Model load fails**: Check model file exists at `SAM3_MODEL_PATH`, verify correct format
 
 ## GPU Issues
 

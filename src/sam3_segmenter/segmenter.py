@@ -83,14 +83,48 @@ class DrawingSegmenter:
             )
 
             logger.info("SAM3 model loaded successfully")
+
+            # Configure interactive predictor transforms based on settings
+            # In precision mode (default), we use 0 for both to preserve raw SAM output
+            # For zone segmentation workflows, higher values smooth the output
+            try:
+                from sam3.model.utils.sam1_utils import SAM2Transforms
+
+                if self._model.inst_interactive_predictor is not None:
+                    predictor = self._model.inst_interactive_predictor
+                    # Use configurable settings (default: 0,0 for precision mode)
+                    max_hole = settings.interactive_max_hole_area
+                    max_sprinkle = settings.interactive_max_sprinkle_area
+                    predictor._transforms = SAM2Transforms(
+                        resolution=predictor.model.image_size,
+                        mask_threshold=0.0,
+                        max_hole_area=max_hole,
+                        max_sprinkle_area=max_sprinkle,
+                    )
+                    if max_hole == 0 and max_sprinkle == 0:
+                        logger.info(
+                            "SAM3 interactive predictor: raw mode (no hole/sprinkle removal) "
+                            "for pixel-precise masks"
+                        )
+                    else:
+                        logger.info(
+                            f"SAM3 interactive predictor configured: "
+                            f"max_hole_area={max_hole}, max_sprinkle_area={max_sprinkle}"
+                        )
+            except Exception as e:
+                logger.warning(f"Could not configure SAM transforms: {e}", exc_info=True)
+
         except ImportError as e:
-            logger.warning(
-                f"SAM3 not available: {e}. Using mock implementation for development."
+            logger.error(
+                f"SAM3 not available: {e}. "
+                "Please install SAM3: cd sam3_reference && pip install -e ."
             )
-            self._model = MockSAM3Model()
-            self._processor = None
+            raise ImportError(
+                f"SAM3 is required but not installed: {e}. "
+                "Install with: cd sam3_reference && pip install -e ."
+            ) from e
         except Exception as e:
-            logger.error(f"Failed to load SAM3 model: {e}")
+            logger.error(f"Failed to load SAM3 model: {e}", exc_info=True)
             raise
 
     def segment(
@@ -118,10 +152,6 @@ class DrawingSegmenter:
         """
         threshold = confidence_threshold or self.confidence_threshold
         img_width, img_height = image.size
-
-        # Handle mock model case
-        if isinstance(self._model, MockSAM3Model):
-            return self._segment_with_mock(image, prompts, threshold, return_masks, return_crops)
 
         zones = []
         zone_counter = 0
@@ -205,74 +235,6 @@ class DrawingSegmenter:
 
         return zones
 
-    def _segment_with_mock(
-        self,
-        image: Image.Image,
-        prompts: list[str],
-        threshold: float,
-        return_masks: bool,
-        return_crops: bool,
-    ) -> list[ZoneResult]:
-        """Segment using mock model for development."""
-        img_width, img_height = image.size
-        results = self._model(image, prompts=prompts)
-
-        zones = []
-        zone_counter = 0
-
-        if hasattr(results, "__iter__") and len(results) > 0:
-            result = results[0] if isinstance(results, list) else results
-            boxes = getattr(result, "boxes", None)
-            masks = getattr(result, "masks", None)
-
-            if boxes is not None:
-                for i in range(len(boxes)):
-                    try:
-                        box = boxes[i]
-                        conf = float(box.conf.cpu().numpy().item()) if hasattr(box, "conf") else 0.5
-
-                        if conf < threshold:
-                            continue
-
-                        bbox = [float(v) for v in box.xyxy[0].cpu().numpy()] if hasattr(box, "xyxy") else None
-                        if bbox is None:
-                            continue
-
-                        prompt_idx = min(i, len(prompts) - 1)
-                        matched_prompt = prompts[prompt_idx]
-
-                        mask_b64 = None
-                        if return_masks and masks is not None and i < len(masks):
-                            mask = masks[i]
-                            if hasattr(mask, "data"):
-                                mask = mask.data
-                            mask_b64 = encode_mask_to_base64(mask)
-
-                        crop_b64 = None
-                        if return_crops:
-                            crop = crop_image_to_bbox(image, bbox, padding=5)
-                            crop_b64 = encode_image_to_base64(crop)
-
-                        zone = ZoneResult(
-                            zone_id=f"zone_{zone_counter:03d}",
-                            zone_type=get_zone_type_from_prompt(matched_prompt),
-                            prompt_matched=matched_prompt,
-                            confidence=conf,
-                            bbox=bbox,
-                            bbox_normalized=normalize_bbox(bbox, img_width, img_height),
-                            area_ratio=calculate_area_ratio(bbox, img_width, img_height),
-                            mask_base64=mask_b64,
-                            crop_base64=crop_b64,
-                        )
-                        zones.append(zone)
-                        zone_counter += 1
-
-                    except Exception as e:
-                        logger.warning(f"Failed to process detection {i}: {e}")
-                        continue
-
-        return zones
-
     def segment_structural(
         self,
         image: Image.Image,
@@ -322,7 +284,7 @@ class DrawingSegmenter:
         box: Optional[np.ndarray] = None,
         mask_input: Optional[np.ndarray] = None,
         multimask_output: bool = True,
-    ) -> tuple[list[np.ndarray], list[float], list[tuple[float, float, float, float]]]:
+    ) -> tuple[list[np.ndarray], list[float], list[tuple[float, float, float, float]], list[np.ndarray]]:
         """
         Segment using point and/or box prompts (PVS mode).
 
@@ -335,19 +297,31 @@ class DrawingSegmenter:
             point_labels: N array of point labels (1=positive, 0=negative)
             box: Box prompt [x1, y1, x2, y2]
             mask_input: Previous mask to refine, low-resolution logits shape [1, H, W]
-            multimask_output: Return multiple mask candidates
+            multimask_output: Return multiple mask candidates. Note: For box prompts
+                (with or without points), this is automatically set to False to return
+                SAM3's single best mask, following Meta's recommendation that
+                non-ambiguous prompts should use single mask output for better quality.
 
         Returns:
-            Tuple of (masks, iou_scores, bboxes) where:
-            - masks: List of binary mask arrays
+            Tuple of (masks, iou_scores, bboxes, low_res_logits) where:
+            - masks: List of binary mask arrays (full resolution)
             - iou_scores: List of predicted IOU scores
             - bboxes: List of bounding boxes [x1, y1, x2, y2]
+            - low_res_logits: List of 256x256 logit arrays for refinement
         """
-        # For mock model, generate mock results
-        if isinstance(self._model, MockSAM3Model):
-            return self._generate_mock_interactive_results(
-                image, point_coords, point_labels, box, multimask_output
+        # SAM3 best practice: Box prompts are "non-ambiguous" and should use single mask
+        # output (multimask_output=False) for better quality. When multimask_output=True,
+        # SAM3 returns 3 candidate masks and uses IoU-based selection which may pick
+        # suboptimal masks (e.g., background-fill instead of precise object outline).
+        # See sam1_task_predictor.py lines 254-259 for Meta's documentation.
+        # This behavior is configurable via SAM3_FORCE_SINGLE_MASK_FOR_BOX env var.
+        if box is not None and multimask_output and settings.force_single_mask_for_box:
+            logger.debug(
+                "Box prompt detected, using multimask_output=False for higher quality "
+                "(SAM3 recommendation for non-ambiguous prompts). "
+                "Set SAM3_FORCE_SINGLE_MASK_FOR_BOX=false to enable multi-mask for boxes."
             )
+            multimask_output = False
 
         # Check that interactive predictor is available
         if self.model.inst_interactive_predictor is None:
@@ -356,12 +330,22 @@ class DrawingSegmenter:
                 "enable_inst_interactivity=True"
             )
 
-        # Use processor to set image and get inference_state with backbone features
+        # Use processor to compute backbone features from the main model
+        # The inference_state contains backbone_out with sam2_backbone_out features
         inference_state = self.processor.set_image(image)
 
-        # Call predict_inst on the model with the inference_state
-        # This uses the shared backbone features and routes to the interactive predictor
-        masks, iou_preds, _ = self.model.predict_inst(
+        # Log the inference state structure for debugging
+        logger.debug(f"Inference state keys: {inference_state.keys()}")
+        if "backbone_out" in inference_state:
+            logger.debug(f"backbone_out keys: {inference_state['backbone_out'].keys()}")
+
+        # Call predict_inst which:
+        # 1. Extracts backbone features from inference_state
+        # 2. Sets them up on the interactive predictor
+        # 3. Calls the interactive predictor's predict method
+        # Returns: (masks, iou_predictions, low_res_masks)
+        # low_res_masks are 256x256 logits used for refinement
+        masks, iou_preds, low_res_masks = self.model.predict_inst(
             inference_state,
             point_coords=point_coords,
             point_labels=point_labels,
@@ -370,10 +354,27 @@ class DrawingSegmenter:
             multimask_output=multimask_output,
         )
 
+        # Log dimensions for debugging coordinate/mask issues
+        img_width, img_height = image.size
+        if len(masks) > 0:
+            mask_shape = masks[0].shape if hasattr(masks[0], 'shape') else 'unknown'
+            logger.debug(
+                f"Interactive segmentation: image=({img_width}x{img_height}), "
+                f"mask_shape={mask_shape}, num_masks={len(masks)}, "
+                f"box={box.tolist() if box is not None else None}"
+            )
+            # Verify mask dimensions match image (height, width order for numpy)
+            if hasattr(masks[0], 'shape') and masks[0].shape != (img_height, img_width):
+                logger.warning(
+                    f"MASK DIMENSION MISMATCH! mask={masks[0].shape}, "
+                    f"expected=({img_height}, {img_width}). This may cause display issues."
+                )
+
         # Build output - masks is numpy array from predict_inst()
         result_masks = []
         result_ious = []
         result_bboxes = []
+        result_low_res = []
 
         for i in range(len(masks)):
             mask = masks[i]
@@ -392,69 +393,13 @@ class DrawingSegmenter:
             result_ious.append(float(iou))
             result_bboxes.append(bbox)
 
-        return result_masks, result_ious, result_bboxes
+            # Include low-res logits for refinement (shape: [H, W] typically 256x256)
+            if i < len(low_res_masks):
+                result_low_res.append(low_res_masks[i])
+            else:
+                result_low_res.append(None)
 
-    def _generate_mock_interactive_results(
-        self,
-        image: Image.Image,
-        point_coords: Optional[np.ndarray],
-        point_labels: Optional[np.ndarray],
-        box: Optional[np.ndarray],
-        multimask_output: bool,
-    ) -> tuple[list[np.ndarray], list[float], list[tuple[float, float, float, float]]]:
-        """Generate mock results for interactive segmentation (testing without GPU)."""
-        img_width, img_height = image.size
-
-        # Determine region of interest from prompts
-        if box is not None:
-            x1, y1, x2, y2 = box
-        elif point_coords is not None and len(point_coords) > 0:
-            # Create a box around the points
-            xs = point_coords[:, 0]
-            ys = point_coords[:, 1]
-            cx, cy = xs.mean(), ys.mean()
-            # Create a region around the center
-            size = min(img_width, img_height) * 0.3
-            x1 = max(0, cx - size)
-            y1 = max(0, cy - size)
-            x2 = min(img_width, cx + size)
-            y2 = min(img_height, cy + size)
-        else:
-            # Default to center region
-            x1 = img_width * 0.25
-            y1 = img_height * 0.25
-            x2 = img_width * 0.75
-            y2 = img_height * 0.75
-
-        # Generate mock masks with different sizes
-        num_masks = 3 if multimask_output else 1
-        masks = []
-        ious = []
-        bboxes = []
-
-        for i in range(num_masks):
-            # Create mask with slightly different sizes
-            scale = 1.0 - (i * 0.15)
-            mask = np.zeros((img_height, img_width), dtype=bool)
-
-            # Calculate scaled region
-            cx = (x1 + x2) / 2
-            cy = (y1 + y2) / 2
-            w = (x2 - x1) * scale
-            h = (y2 - y1) * scale
-
-            mx1 = int(max(0, cx - w / 2))
-            my1 = int(max(0, cy - h / 2))
-            mx2 = int(min(img_width, cx + w / 2))
-            my2 = int(min(img_height, cy + h / 2))
-
-            mask[my1:my2, mx1:mx2] = True
-
-            masks.append(mask)
-            ious.append(0.95 - (i * 0.1))  # Decreasing IOU scores
-            bboxes.append((float(mx1), float(my1), float(mx2), float(my2)))
-
-        return masks, ious, bboxes
+        return result_masks, result_ious, result_bboxes, result_low_res
 
     def load_exemplar(self, zone_type: str, image_path: Union[str, Path]):
         """
@@ -520,90 +465,3 @@ class DrawingSegmenter:
             "memory_allocated_mb": torch.cuda.memory_allocated(0) // (1024 * 1024),
             "memory_reserved_mb": torch.cuda.memory_reserved(0) // (1024 * 1024),
         }
-
-
-class MockSAM3Model:
-    """Mock SAM3 model for development/testing when SAM3 is not available."""
-
-    def __call__(self, image, prompts=None, **kwargs):
-        """Return mock results for testing."""
-        logger.warning("Using MockSAM3Model - results are not real segmentation")
-
-        # Create mock results
-        if isinstance(image, Image.Image):
-            width, height = image.size
-        else:
-            height, width = image.shape[:2]
-
-        mock_results = MockResults(width, height, prompts or [])
-        return [mock_results]
-
-
-class MockResults:
-    """Mock results object for testing."""
-
-    def __init__(self, width: int, height: int, prompts: list[str]):
-        self.boxes = MockBoxes(width, height, len(prompts))
-        self.masks = MockMasks(width, height, len(prompts))
-
-
-class MockBoxes:
-    """Mock boxes for testing."""
-
-    def __init__(self, width: int, height: int, num_boxes: int):
-        self.width = width
-        self.height = height
-        self.num_boxes = num_boxes
-
-    def __len__(self):
-        return self.num_boxes
-
-    def __getitem__(self, idx):
-        # Return a mock box in a typical location
-        if idx == 0:  # Title block - bottom right
-            x1, y1 = self.width * 0.7, self.height * 0.8
-            x2, y2 = self.width * 0.98, self.height * 0.98
-        else:
-            # Random position for other boxes
-            x1 = self.width * (0.1 + 0.2 * (idx % 4))
-            y1 = self.height * (0.1 + 0.2 * (idx // 4))
-            x2 = x1 + self.width * 0.2
-            y2 = y1 + self.height * 0.2
-
-        return MockBox([x1, y1, x2, y2], conf=0.5 + 0.1 * (idx % 5))
-
-
-class MockBox:
-    """Mock single box for testing."""
-
-    def __init__(self, coords: list[float], conf: float = 0.5):
-        self.xyxy = [torch.tensor(coords)]
-        self.conf = torch.tensor([conf])
-
-
-class MockMasks:
-    """Mock masks for testing."""
-
-    def __init__(self, width: int, height: int, num_masks: int):
-        self.width = width
-        self.height = height
-        self.num_masks = num_masks
-
-    def __len__(self):
-        return self.num_masks
-
-    def __getitem__(self, idx):
-        # Return a simple mock mask
-        mask = np.zeros((self.height, self.width), dtype=np.float32)
-        # Fill a region
-        y1, y2 = int(self.height * 0.3), int(self.height * 0.7)
-        x1, x2 = int(self.width * 0.3), int(self.width * 0.7)
-        mask[y1:y2, x1:x2] = 1.0
-        return MockMask(mask)
-
-
-class MockMask:
-    """Mock single mask for testing."""
-
-    def __init__(self, data: np.ndarray):
-        self.data = torch.tensor(data)

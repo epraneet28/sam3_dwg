@@ -12,6 +12,7 @@
 
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { getZoneColor } from '../../utils/constants';
+import { screenToImageCoords } from '../../utils/canvasCoordinates';
 import type { ZoneResult } from '../../types';
 
 // Convert hex color to RGB
@@ -226,19 +227,20 @@ export function DrawingCanvas({
     if (!containerRect) return;
 
     // Calculate mouse position in image coordinates
-    // Account for: container center, pan offset, and zoom
-    const mouseRelativeToContainer = {
-      x: e.clientX - containerRect.left - containerRect.width / 2,
-      y: e.clientY - containerRect.top - containerRect.height / 2,
-    };
-
-    const imageX = (mouseRelativeToContainer.x - pan.x) / zoom + imageDimensions.width / 2;
-    const imageY = (mouseRelativeToContainer.y - pan.y) / zoom + imageDimensions.height / 2;
+    // Uses CSS-aware coordinate mapping that accounts for maxWidth/maxHeight downscaling
+    const coords = screenToImageCoords(
+      e.clientX,
+      e.clientY,
+      containerRect,
+      pan,
+      zoom,
+      imageDimensions
+    );
 
     // Find clicked zone (reverse order for top-most)
     for (let i = zones.length - 1; i >= 0; i--) {
       const [x1, y1, x2, y2] = zones[i].bbox;
-      if (imageX >= x1 && imageX <= x2 && imageY >= y1 && imageY <= y2) {
+      if (coords.x >= x1 && coords.x <= x2 && coords.y >= y1 && coords.y <= y2) {
         onZoneClick(zones[i].zone_id);
         return;
       }
@@ -255,18 +257,20 @@ export function DrawingCanvas({
     const containerRect = containerRef.current?.getBoundingClientRect();
     if (!containerRect) return;
 
-    const mouseRelativeToContainer = {
-      x: e.clientX - containerRect.left - containerRect.width / 2,
-      y: e.clientY - containerRect.top - containerRect.height / 2,
-    };
-
-    const imageX = (mouseRelativeToContainer.x - pan.x) / zoom + imageDimensions.width / 2;
-    const imageY = (mouseRelativeToContainer.y - pan.y) / zoom + imageDimensions.height / 2;
+    // Uses CSS-aware coordinate mapping that accounts for maxWidth/maxHeight downscaling
+    const coords = screenToImageCoords(
+      e.clientX,
+      e.clientY,
+      containerRect,
+      pan,
+      zoom,
+      imageDimensions
+    );
 
     // Find hovered zone
     for (let i = zones.length - 1; i >= 0; i--) {
       const [x1, y1, x2, y2] = zones[i].bbox;
-      if (imageX >= x1 && imageX <= x2 && imageY >= y1 && imageY <= y2) {
+      if (coords.x >= x1 && coords.x <= x2 && coords.y >= y1 && coords.y <= y2) {
         if (hoveredZoneId !== zones[i].zone_id) {
           onZoneHover(zones[i].zone_id);
         }

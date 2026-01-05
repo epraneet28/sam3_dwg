@@ -21,16 +21,26 @@ import {
   XMarkIcon,
   PlusIcon,
   MinusIcon,
+  TrashIcon,
+  BookmarkIcon,
 } from '@heroicons/react/24/outline';
 import { useDocuments } from '../store';
 import { api } from '../api/client';
-import { PlaygroundCanvas } from '../components/playground';
+import { PlaygroundCanvas, SmartSelectPanel } from '../components/playground';
 import { DrawingCanvas } from '../components/viewer';
 import { MinimalTopBar, ControlsHint, ConfidenceSlider } from '../components/shared';
 import { useZoomPan } from '../hooks/useZoomPan';
+import { useSmartSelect } from '../hooks/useSmartSelect';
+import {
+  usePlaygroundStatePersistence,
+  loadPlaygroundState,
+  clearPlaygroundState,
+  hasPlaygroundState,
+  formatSavedTime,
+  type ExperimentResult,
+} from '../hooks/usePlaygroundState';
 import { getZoneColor } from '../utils/constants';
 import type {
-  ZoneResult,
   PointPrompt,
   BoxPrompt,
   PointPromptMode,
@@ -39,14 +49,6 @@ import type {
 } from '../types';
 
 type InputMode = 'text' | 'box' | 'points';
-
-interface ExperimentResult {
-  id: string;
-  prompts: string[];
-  zones: ZoneResult[];
-  processingTimeMs: number;
-  timestamp: number;
-}
 
 export default function Playground() {
   const navigate = useNavigate();
@@ -101,7 +103,26 @@ export default function Playground() {
   const [selectedMaskIndex, setSelectedMaskIndex] = useState<number>(0);
 
   // Mask input for refinement (Input Type 4)
+  // Prefer low-res logits (maskLogitsBase64) over binarized mask (maskInputBase64) for better quality
   const [maskInputBase64, setMaskInputBase64] = useState<string | null>(null);
+  const [maskLogitsBase64, setMaskLogitsBase64] = useState<string | null>(null);
+
+  // Smart Select state (Roboflow-style features)
+  const [smartSelectOpen, setSmartSelectOpen] = useState(false);
+  const smartSelect = useSmartSelect({
+    onFinish: (mask, polygon) => {
+      console.log('Selection confirmed:', { mask, polygon });
+      // Could save annotation here
+    },
+    onDelete: () => {
+      setMaskCandidates([]);
+      setSelectedMaskIndex(0);
+    },
+  });
+
+  // Saved state tracking
+  const [savedStateTimestamp, setSavedStateTimestamp] = useState<number | null>(null);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   // Zoom/pan controls (matching Viewer)
   const {
@@ -137,14 +158,79 @@ export default function Playground() {
     return documents.filter((d) => d.status === 'segmented');
   }, [documents]);
 
-  // Handle document selection
-  const handleSelectDocument = useCallback((docId: string) => {
+  // Track which documents have saved playground state
+  const docsWithSavedState = useMemo(() => {
+    const set = new Set<string>();
+    segmentedDocs.forEach((doc) => {
+      if (hasPlaygroundState(doc.id)) {
+        set.add(doc.id);
+      }
+    });
+    return set;
+  }, [segmentedDocs]);
+
+  // Auto-save playground state
+  usePlaygroundStatePersistence({
+    docId: selectedDocId,
+    prompts,
+    results,
+    activeResultId,
+    pointPrompts,
+    boxPrompts,
+    maskCandidates,
+    selectedMaskIndex,
+    maskInputBase64,
+    maskLogitsBase64,
+    inputMode,
+    confidenceThreshold,
+    enabled: true,
+  });
+
+  // Handle document selection - load saved state if exists
+  const handleSelectDocument = useCallback(async (docId: string) => {
     setSelectedDocId(docId);
-    const url = api.getPageImageUrl(docId, 0);
-    setImageUrl(url);
-    setResults([]);
-    setActiveResultId(null);
     setError(null);
+    setShowClearConfirm(false);
+
+    // Load image from backend storage
+    try {
+      const url = await api.getPageImageUrl(docId, 0);
+      setImageUrl(url);
+    } catch (err) {
+      console.error('Failed to load document image:', err);
+      setError('Failed to load document image');
+      return;
+    }
+
+    // Try to load saved playground state for this document
+    const savedState = loadPlaygroundState(docId);
+    if (savedState) {
+      // Restore saved state
+      setPrompts(savedState.prompts.length > 0 ? savedState.prompts : ['']);
+      setResults(savedState.results || []);
+      setActiveResultId(savedState.activeResultId);
+      setPointPrompts(savedState.pointPrompts || []);
+      setBoxPrompts(savedState.boxPrompts || []);
+      setMaskCandidates(savedState.maskCandidates || []);
+      setSelectedMaskIndex(savedState.selectedMaskIndex || 0);
+      setMaskInputBase64(savedState.maskInputBase64 || null);
+      setMaskLogitsBase64(savedState.maskLogitsBase64 || null);
+      setInputMode(savedState.inputMode || 'text');
+      setConfidenceThreshold(savedState.confidenceThreshold ?? 0.3);
+      setSavedStateTimestamp(savedState.savedAt);
+    } else {
+      // Reset to defaults
+      setPrompts(['']);
+      setResults([]);
+      setActiveResultId(null);
+      setPointPrompts([]);
+      setBoxPrompts([]);
+      setMaskCandidates([]);
+      setSelectedMaskIndex(0);
+      setMaskInputBase64(null);
+      setMaskLogitsBase64(null);
+      setSavedStateTimestamp(null);
+    }
   }, []);
 
   // Prompt management
@@ -181,14 +267,13 @@ export default function Playground() {
     setError(null);
 
     try {
-      // Get base64 from localStorage (mock mode)
-      const base64 = localStorage.getItem(`sam3_doc_${selectedDocId}`);
-      if (!base64) {
-        throw new Error('Image data not found in storage');
+      // Use imageUrl which is already loaded from backend storage
+      if (!imageUrl) {
+        throw new Error('Image not loaded');
       }
 
       // Call segment endpoint with custom prompts
-      const result = await api.segmentWithPrompts(base64, activePrompts, confidenceThreshold);
+      const result = await api.segmentWithPrompts(imageUrl, activePrompts, confidenceThreshold);
 
       const newResult: ExperimentResult = {
         id: `result_${Date.now()}`,
@@ -200,13 +285,15 @@ export default function Playground() {
 
       setResults((prev) => [newResult, ...prev]);
       setActiveResultId(newResult.id);
+      // Clear "restored from" indicator since we have new results
+      setSavedStateTimestamp(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Segmentation failed');
       console.error('Playground run failed:', err);
     } finally {
       setRunning(false);
     }
-  }, [selectedDocId, inputMode, prompts, confidenceThreshold]);
+  }, [selectedDocId, imageUrl, inputMode, prompts, confidenceThreshold]);
 
   // Quick prompt templates
   const quickPrompts = [
@@ -238,6 +325,61 @@ export default function Playground() {
     setMaskCandidates([]); // Clear previous results
     setSelectedMaskIndex(0);
   }, []);
+
+  // Refinement click handler - adds point and auto-runs with mask input
+  const handleRefinementClick = useCallback(
+    async (point: PointPrompt, isInsideMask: boolean) => {
+      // Use current mask as input for refinement
+      const currentMask = maskCandidates[selectedMaskIndex];
+      if (!currentMask?.mask_base64) return;
+
+      // Add the new point to existing points
+      const newPoints = [...pointPrompts, point];
+      setPointPrompts(newPoints);
+
+      // Prefer low-res logits for refinement (better quality than binarized mask)
+      const hasLogits = !!currentMask.low_res_logits_base64;
+      if (hasLogits) {
+        setMaskLogitsBase64(currentMask.low_res_logits_base64!);
+        setMaskInputBase64(null);
+      } else {
+        setMaskInputBase64(currentMask.mask_base64);
+        setMaskLogitsBase64(null);
+      }
+
+      // Log the action for debugging
+      console.log(`Refinement: ${isInsideMask ? 'Remove (inside)' : 'Add (outside)'} at (${Math.round(point.x)}, ${Math.round(point.y)}), using ${hasLogits ? 'logits' : 'binarized mask'}`);
+
+      // Auto-run inference with the new point and mask input
+      if (!imageUrl) return;
+
+      setRunning(true);
+      setError(null);
+
+      try {
+        const result = await api.segmentInteractive(imageUrl, {
+          points: newPoints.map((p) => ({ x: p.x, y: p.y, label: p.label })),
+          // Prefer logits over binarized mask for higher quality refinement
+          maskLogits: currentMask.low_res_logits_base64 || undefined,
+          maskInput: currentMask.low_res_logits_base64 ? undefined : currentMask.mask_base64,
+        });
+
+        setMaskCandidates(result.masks);
+        setSelectedMaskIndex(0);
+
+        // Sync with Smart Select
+        if (result.masks.length > 0) {
+          smartSelect.setMask(result.masks[0], newPoints, null);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Refinement failed');
+        console.error('Refinement failed:', err);
+      } finally {
+        setRunning(false);
+      }
+    },
+    [imageUrl, maskCandidates, selectedMaskIndex, pointPrompts, smartSelect]
+  );
 
   const handleRemovePoint = useCallback((id: string) => {
     setPointPrompts((prev) => prev.filter((p) => p.id !== id));
@@ -280,22 +422,58 @@ export default function Playground() {
   // Mask input handlers (Input Type 4 - Mask Prompts)
   const handleUseMaskAsInput = useCallback(() => {
     if (maskCandidates.length > 0 && selectedMaskIndex < maskCandidates.length) {
-      const selectedMaskData = maskCandidates[selectedMaskIndex].mask_base64;
-      setMaskInputBase64(selectedMaskData);
+      const selectedMask = maskCandidates[selectedMaskIndex];
+      // Prefer low-res logits for better quality refinement
+      if (selectedMask.low_res_logits_base64) {
+        setMaskLogitsBase64(selectedMask.low_res_logits_base64);
+        setMaskInputBase64(null);
+      } else {
+        setMaskInputBase64(selectedMask.mask_base64);
+        setMaskLogitsBase64(null);
+      }
     }
   }, [maskCandidates, selectedMaskIndex]);
 
   const handleClearMaskInput = useCallback(() => {
     setMaskInputBase64(null);
+    setMaskLogitsBase64(null);
   }, []);
+
+  // Clear all annotations (unified clear for all modes)
+  const handleClearAllAnnotations = useCallback(() => {
+    // Clear text mode state
+    setPrompts(['']);
+    setResults([]);
+    setActiveResultId(null);
+    // Clear point prompts
+    setPointPrompts([]);
+    // Clear box prompts
+    setBoxPrompts([]);
+    // Clear mask candidates and selection
+    setMaskCandidates([]);
+    setSelectedMaskIndex(0);
+    // Clear mask input for refinement (both binarized and logits)
+    setMaskInputBase64(null);
+    setMaskLogitsBase64(null);
+    // Clear any error
+    setError(null);
+    // Clear saved state timestamp indicator
+    setSavedStateTimestamp(null);
+    // Clear saved state from localStorage
+    if (selectedDocId) {
+      clearPlaygroundState(selectedDocId);
+    }
+    // Close confirmation dialog
+    setShowClearConfirm(false);
+  }, [selectedDocId]);
 
   // Run interactive segmentation for points/box modes
   const handleRunInteractive = useCallback(async () => {
     if (!selectedDocId) return;
 
-    const base64 = localStorage.getItem(`sam3_doc_${selectedDocId}`);
-    if (!base64) {
-      setError('Image data not found in storage');
+    // Use imageUrl which is already loaded from backend storage
+    if (!imageUrl) {
+      setError('Image not loaded');
       return;
     }
 
@@ -307,7 +485,9 @@ export default function Playground() {
       const options: {
         points?: Array<{ x: number; y: number; label: 0 | 1 }>;
         box?: [number, number, number, number];
+        boxes?: Array<[number, number, number, number]>;
         maskInput?: string;
+        maskLogits?: string;
       } = {};
 
       // Add point prompts if in points mode
@@ -319,28 +499,65 @@ export default function Playground() {
         }));
       }
 
-      // Add box prompt if in box mode
+      // Add box prompt(s) if in box mode
       if (inputMode === 'box' && boxPrompts.length > 0) {
-        const box = boxPrompts[boxPrompts.length - 1];
-        options.box = [box.x1, box.y1, box.x2, box.y2];
+        if (boxPrompts.length === 1) {
+          // Single box mode - use 'box' field
+          const box = boxPrompts[0];
+          options.box = [box.x1, box.y1, box.x2, box.y2];
+        } else {
+          // Multi-box mode - use 'boxes' field for merged segmentation
+          options.boxes = boxPrompts.map(box => [box.x1, box.y1, box.x2, box.y2] as [number, number, number, number]);
+        }
       }
 
       // Add mask input if available (for refinement)
-      if (maskInputBase64) {
+      // Prefer logits over binarized mask for better quality
+      if (maskLogitsBase64) {
+        options.maskLogits = maskLogitsBase64;
+      } else if (maskInputBase64) {
         options.maskInput = maskInputBase64;
       }
 
       // Call unified interactive segmentation API
-      const result = await api.segmentInteractive(base64, options);
+      const result = await api.segmentInteractive(imageUrl, options);
       setMaskCandidates(result.masks);
       setSelectedMaskIndex(0);
+      // Clear "restored from" indicator since we have new results
+      setSavedStateTimestamp(null);
+
+      // Sync with Smart Select for undo/redo tracking
+      if (result.masks.length > 0) {
+        smartSelect.setMask(
+          result.masks[0],
+          pointPrompts,
+          boxPrompts.length > 0 ? boxPrompts[boxPrompts.length - 1] : null
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Interactive segmentation failed');
       console.error('Interactive segmentation failed:', err);
     } finally {
       setRunning(false);
     }
-  }, [selectedDocId, inputMode, pointPrompts, boxPrompts, maskInputBase64]);
+  }, [selectedDocId, imageUrl, inputMode, pointPrompts, boxPrompts, maskInputBase64, maskLogitsBase64]);
+
+  // Keyboard shortcut for clearing annotations (Escape key)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Escape key clears all annotations in interactive modes
+      if (e.key === 'Escape' && (inputMode === 'points' || inputMode === 'box')) {
+        // Don't clear if user is typing in an input
+        if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
+          return;
+        }
+        handleClearAllAnnotations();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [inputMode, handleClearAllAnnotations]);
 
   // Auto-run effect with debounce (only for interactive modes when enabled)
   useEffect(() => {
@@ -401,20 +618,38 @@ export default function Playground() {
         title="Playground"
         subtitle="Experiment with SAM3 input modes"
         onBack={() => navigate('/')}
-        actions={
+        centerContent={
           <select
             value={selectedDocId || ''}
             onChange={(e) => handleSelectDocument(e.target.value)}
-            className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 min-w-[280px] max-w-[350px]"
+            className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 w-full min-w-[200px] max-w-[350px]"
             title="Select document"
           >
             <option value="">Select a document...</option>
             {segmentedDocs.map((doc) => (
               <option key={doc.id} value={doc.id}>
-                {doc.name}
+                {docsWithSavedState.has(doc.id) ? '● ' : ''}{doc.name}
               </option>
             ))}
           </select>
+        }
+        actions={
+          <button
+            onClick={() => setShowClearConfirm(true)}
+            disabled={
+              results.length === 0 &&
+              pointPrompts.length === 0 &&
+              boxPrompts.length === 0 &&
+              maskCandidates.length === 0 &&
+              !maskInputBase64 &&
+              prompts.every((p) => !p.trim())
+            }
+            className="flex items-center gap-2 px-3 py-1.5 bg-red-600 hover:bg-red-700 disabled:bg-slate-700/50 disabled:text-slate-600 text-white rounded-lg text-sm font-medium transition-colors"
+            title="Clear all annotations"
+          >
+            <TrashIcon className="w-4 h-4" />
+            <span className="hidden sm:inline">Clear All</span>
+          </button>
         }
       />
 
@@ -471,6 +706,10 @@ export default function Playground() {
               onAddBox={handleAddBox}
               onRemoveBox={handleRemoveBox}
               selectedMask={selectedMask}
+              displayMode={smartSelect.outputMode}
+              polygon={smartSelect.currentPolygon}
+              selectState={smartSelect.selectState}
+              onRefinementClick={handleRefinementClick}
             />
           )
         ) : (
@@ -487,9 +726,11 @@ export default function Playground() {
 
         <ControlsHint />
 
-        {/* Floating Input Modes Panel (Left) */}
+        {/* Left Side Panels Container */}
         {selectedDocId && (
-          <div className="absolute top-4 left-4 w-80 bg-slate-800/95 backdrop-blur-sm border border-slate-700 rounded-xl shadow-2xl z-40 overflow-hidden">
+          <div className="absolute top-4 left-4 w-80 z-40 flex flex-col gap-3">
+            {/* Input Modes Panel */}
+            <div className="bg-slate-800/95 backdrop-blur-sm border border-slate-700 rounded-xl shadow-2xl overflow-hidden">
             {/* Mode Tabs */}
             <div className="flex border-b border-slate-700">
               {(Object.keys(modeInfo) as InputMode[]).map((mode) => {
@@ -791,30 +1032,32 @@ export default function Playground() {
                 </div>
               )}
 
-              {/* Run button */}
-              <button
-                onClick={inputMode === 'text' ? handleRun : handleRunInteractive}
-                disabled={
-                  running ||
-                  !selectedDocId ||
-                  (inputMode === 'text' && prompts.every((p) => !p.trim())) ||
-                  (inputMode === 'points' && pointPrompts.length === 0) ||
-                  (inputMode === 'box' && boxPrompts.length === 0)
-                }
-                className="w-full mt-4 flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg font-medium transition-colors"
-              >
-                {running ? (
-                  <>
-                    <ArrowPathIcon className="w-4 h-4 animate-spin" />
-                    Running...
-                  </>
-                ) : (
-                  <>
-                    <PlayIcon className="w-4 h-4" />
-                    Run Segmentation
-                  </>
-                )}
-              </button>
+              {/* Action buttons */}
+              <div className="mt-4 flex gap-2">
+                <button
+                  onClick={inputMode === 'text' ? handleRun : handleRunInteractive}
+                  disabled={
+                    running ||
+                    !selectedDocId ||
+                    (inputMode === 'text' && prompts.every((p) => !p.trim())) ||
+                    (inputMode === 'points' && pointPrompts.length === 0) ||
+                    (inputMode === 'box' && boxPrompts.length === 0)
+                  }
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg font-medium transition-colors"
+                >
+                  {running ? (
+                    <>
+                      <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                      Running...
+                    </>
+                  ) : (
+                    <>
+                      <PlayIcon className="w-4 h-4" />
+                      Run
+                    </>
+                  )}
+                </button>
+              </div>
 
               {/* Error message */}
               {error && (
@@ -823,6 +1066,75 @@ export default function Playground() {
                 </div>
               )}
             </div>
+            </div>
+
+            {/* Smart Select Panel (shown in interactive modes when masks are available) */}
+            {(inputMode === 'points' || inputMode === 'box') && (
+              <SmartSelectPanel
+                isOpen={smartSelectOpen || maskCandidates.length > 0}
+                onClose={() => setSmartSelectOpen(false)}
+                selectState={smartSelect.selectState}
+                outputMode={smartSelect.outputMode}
+                onOutputModeChange={smartSelect.setOutputMode}
+                currentMask={selectedMask}
+                currentPolygon={smartSelect.currentPolygon}
+                maskCandidates={maskCandidates}
+                selectedMaskIndex={selectedMaskIndex}
+                onSelectMask={(idx) => {
+                  setSelectedMaskIndex(idx);
+                  // Sync the selected mask to SmartSelect for polygon extraction
+                  // Also update mask input so manual Run uses the selected mask
+                  if (maskCandidates[idx]) {
+                    const mask = maskCandidates[idx];
+                    // Prefer logits for refinement
+                    if (mask.low_res_logits_base64) {
+                      setMaskLogitsBase64(mask.low_res_logits_base64);
+                      setMaskInputBase64(null);
+                    } else {
+                      setMaskInputBase64(mask.mask_base64);
+                      setMaskLogitsBase64(null);
+                    }
+                    smartSelect.setMask(
+                      mask,
+                      pointPrompts,
+                      boxPrompts.length > 0 ? boxPrompts[boxPrompts.length - 1] : null
+                    );
+                  }
+                }}
+                polygonComplexity={smartSelect.polygonComplexity}
+                onPolygonComplexityChange={smartSelect.setPolygonComplexity}
+                canUndo={smartSelect.canUndo}
+                canRedo={smartSelect.canRedo}
+                onUndo={() => {
+                  const entry = smartSelect.undo();
+                  if (entry) {
+                    setPointPrompts(entry.points);
+                    setBoxPrompts(entry.box ? [entry.box] : []);
+                    setMaskCandidates([entry.mask]);
+                    setSelectedMaskIndex(0);
+                  }
+                }}
+                onRedo={() => {
+                  const entry = smartSelect.redo();
+                  if (entry) {
+                    setPointPrompts(entry.points);
+                    setBoxPrompts(entry.box ? [entry.box] : []);
+                    setMaskCandidates([entry.mask]);
+                    setSelectedMaskIndex(0);
+                  }
+                }}
+                onDelete={() => {
+                  smartSelect.deleteSelection();
+                  setMaskCandidates([]);
+                  setSelectedMaskIndex(0);
+                }}
+                onFinish={() => {
+                  smartSelect.finish();
+                  // Could trigger save/export action here
+                }}
+                isRunning={running}
+              />
+            )}
           </div>
         )}
 
@@ -838,13 +1150,58 @@ export default function Playground() {
                     {activeZones.length} zones detected
                   </p>
                 </div>
-                <button
-                  onClick={() => setSidebarOpen(false)}
-                  className="p-1 text-slate-400 hover:text-white transition-colors"
-                >
-                  <XMarkIcon className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-1">
+                  {/* Clear All button */}
+                  <button
+                    onClick={() => setShowClearConfirm(true)}
+                    disabled={results.length === 0 && pointPrompts.length === 0 && boxPrompts.length === 0 && maskCandidates.length === 0}
+                    className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-red-500/10 disabled:text-slate-600 disabled:hover:bg-transparent rounded transition-colors"
+                    title="Clear all annotations"
+                  >
+                    <TrashIcon className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setSidebarOpen(false)}
+                    className="p-1 text-slate-400 hover:text-white transition-colors"
+                  >
+                    <XMarkIcon className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
+
+              {/* Clear confirmation dialog */}
+              {showClearConfirm && (
+                <div className="mt-3 p-3 bg-red-900/20 border border-red-500/30 rounded-lg">
+                  <p className="text-xs text-red-300 font-medium mb-2">
+                    Clear all annotations?
+                  </p>
+                  <p className="text-[10px] text-slate-400 mb-3">
+                    This will remove all results, prompts, and saved state for this document.
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleClearAllAnnotations}
+                      className="flex-1 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-medium rounded transition-colors"
+                    >
+                      Clear All
+                    </button>
+                    <button
+                      onClick={() => setShowClearConfirm(false)}
+                      className="flex-1 px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs font-medium rounded transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Saved state indicator */}
+              {savedStateTimestamp && !showClearConfirm && (
+                <div className="mt-2 flex items-center gap-1.5 text-[10px] text-emerald-400">
+                  <BookmarkIcon className="w-3 h-3" />
+                  <span>Restored from {formatSavedTime(savedStateTimestamp)}</span>
+                </div>
+              )}
 
               {/* Confidence threshold */}
               <div className="mt-3">
@@ -872,13 +1229,13 @@ export default function Playground() {
               </div>
 
               {/* Mask input indicator */}
-              {(inputMode === 'points' || inputMode === 'box') && maskInputBase64 && (
+              {(inputMode === 'points' || inputMode === 'box') && (maskInputBase64 || maskLogitsBase64) && (
                 <div className="mt-3 p-2.5 bg-amber-900/20 border border-amber-500/30 rounded-lg">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
                       <span className="text-xs text-amber-300 font-medium">
-                        Mask Input Active
+                        {maskLogitsBase64 ? 'Logits Input Active' : 'Mask Input Active'}
                       </span>
                     </div>
                     <button
@@ -889,7 +1246,9 @@ export default function Playground() {
                     </button>
                   </div>
                   <p className="mt-1.5 text-[10px] text-slate-500">
-                    Using previous mask for refinement. Add points/box to refine the selection.
+                    {maskLogitsBase64
+                      ? 'Using low-res logits for high-quality refinement.'
+                      : 'Using previous mask for refinement (legacy mode).'}
                   </p>
                 </div>
               )}

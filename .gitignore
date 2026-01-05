@@ -88,6 +88,20 @@ tests/fixtures/*.png
 # Large directories (install separately)
 UI kits/
 sam3_reference/
+sam3-ui/
+reference/
+
+# Root-level node (playwright-mcp)
+/node_modules/
+/package.json
+/package-lock.json
+
+# Runtime storage
+storage/
+logs/
+
+# Claude Code
+.claude/
 
 # Generated/temp files
 .playwright-mcp/

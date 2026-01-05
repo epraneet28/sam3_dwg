@@ -66,16 +66,21 @@ export default function Viewer() {
       const segmentResult = await api.segmentDocument(docId);
 
       // Update document with new segmentation results
-      updateDocument(docId, {
-        status: 'segmented',
-        configVersionUsed: configVersion,
-        pages: segmentResult.pages.map((p) => ({
+      // Fetch image URLs asynchronously
+      const pages = await Promise.all(
+        segmentResult.pages.map(async (p) => ({
           pageNumber: p.pageNumber,
-          imageUrl: api.getPageImageUrl(docId, p.pageNumber),
+          imageUrl: await api.getPageImageUrl(docId, p.pageNumber),
           zones: p.zones,
           pageType: p.pageType,
           processingTimeMs: p.processingTimeMs,
-        })),
+        }))
+      );
+
+      updateDocument(docId, {
+        status: 'segmented',
+        configVersionUsed: configVersion,
+        pages,
       });
 
       setShowResegmentDialog(false);
@@ -306,22 +311,22 @@ export default function Viewer() {
         title="Viewer"
         subtitle={`${document.totalPages} ${document.totalPages === 1 ? 'page' : 'pages'} • ${totalZones} ${totalZones === 1 ? 'zone' : 'zones'} detected`}
         onBack={() => navigate('/')}
+        centerContent={
+          <select
+            value={docId || ''}
+            onChange={(e) => handleSelectDocument(e.target.value)}
+            className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 w-full min-w-[200px] max-w-[350px]"
+            title="Switch document"
+          >
+            {segmentedDocs.map((doc) => (
+              <option key={doc.id} value={doc.id}>
+                {doc.name}
+              </option>
+            ))}
+          </select>
+        }
         actions={
-          <div className="flex items-center gap-3">
-            {/* Document Selector */}
-            <select
-              value={docId || ''}
-              onChange={(e) => handleSelectDocument(e.target.value)}
-              className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 min-w-[280px] max-w-[350px]"
-              title="Switch document"
-            >
-              {segmentedDocs.map((doc) => (
-                <option key={doc.id} value={doc.id}>
-                  {doc.name}
-                </option>
-              ))}
-            </select>
-
+          <div className="flex items-center gap-2">
             {/* Config Changed Badge */}
             {configChanged && resegmentDismissed && (
               <button
@@ -332,7 +337,7 @@ export default function Viewer() {
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                 </svg>
-                Settings Changed
+                <span className="hidden sm:inline">Settings Changed</span>
               </button>
             )}
             <button
@@ -343,7 +348,7 @@ export default function Viewer() {
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
               </svg>
-              Export
+              <span className="hidden sm:inline">Export</span>
             </button>
           </div>
         }

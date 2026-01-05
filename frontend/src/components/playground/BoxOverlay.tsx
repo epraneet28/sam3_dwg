@@ -3,9 +3,13 @@
  *
  * Renders completed boxes and the active box being drawn.
  * Boxes are positioned in image coordinate space and transformed to match zoom/pan.
+ *
+ * Uses CSS-constrained dimensions to match the canvas's maxWidth/maxHeight behavior.
  */
 
+import { useMemo } from 'react';
 import type { BoxPrompt, BoxDragState } from '../../types';
+import { calculateCssScale } from '../../utils/canvasCoordinates';
 
 interface BoxOverlayProps {
   boxes: BoxPrompt[];
@@ -13,6 +17,7 @@ interface BoxOverlayProps {
   imageDimensions: { width: number; height: number };
   zoom: number;
   pan: { x: number; y: number };
+  containerRef: React.RefObject<HTMLDivElement>;
   onBoxRemove?: (id: string) => void;
 }
 
@@ -22,10 +27,24 @@ export function BoxOverlay({
   imageDimensions,
   zoom,
   pan,
+  containerRef,
   onBoxRemove,
 }: BoxOverlayProps) {
   // SVG viewBox matches image dimensions for proper coordinate mapping
   const viewBox = `0 0 ${imageDimensions.width} ${imageDimensions.height}`;
+
+  // Calculate CSS-constrained dimensions to match canvas sizing
+  const { renderedWidth, renderedHeight } = useMemo(() => {
+    if (!containerRef.current) {
+      return { renderedWidth: imageDimensions.width, renderedHeight: imageDimensions.height };
+    }
+    const rect = containerRef.current.getBoundingClientRect();
+    const cssScale = calculateCssScale(rect, imageDimensions);
+    return {
+      renderedWidth: imageDimensions.width * cssScale,
+      renderedHeight: imageDimensions.height * cssScale,
+    };
+  }, [containerRef, imageDimensions]);
 
   // Normalize box coordinates (handle negative-direction draws)
   const normalizeBox = (
@@ -48,18 +67,18 @@ export function BoxOverlay({
 
   return (
     <svg
-      className="absolute inset-0 pointer-events-none"
+      className="absolute pointer-events-none"
       viewBox={viewBox}
       preserveAspectRatio="xMidYMid meet"
       style={{
-        width: imageDimensions.width,
-        height: imageDimensions.height,
-        transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+        width: renderedWidth,
+        height: renderedHeight,
+        // Use translate(-50%, -50%) for centering instead of margins
+        // This works correctly when CSS constraints change the rendered size
+        transform: `translate(-50%, -50%) translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
         transformOrigin: 'center center',
         left: '50%',
         top: '50%',
-        marginLeft: -imageDimensions.width / 2,
-        marginTop: -imageDimensions.height / 2,
       }}
     >
       {/* Render completed boxes */}

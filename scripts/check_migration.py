@@ -206,17 +206,16 @@ if all_deps:
     try:
         from src.sam3_segmenter.segmenter import DrawingSegmenter
 
-        # Try to initialize (will use mock if model not available)
+        # Initialize segmenter (requires SAM3 to be installed)
         segmenter = DrawingSegmenter()
         model_type = type(segmenter.model).__name__
         print(f"    ✓ DrawingSegmenter initialized")
         print(f"      Model type: {model_type}")
         print(f"      Device: {segmenter.device}")
-
-        if "Mock" in model_type:
-            print("      ⚠ Using MockSAM3Model (real model not loaded)")
-        else:
-            print("      ✓ Using real SAM3 model")
+        print("      ✓ Using real SAM3 model")
+    except ImportError as e:
+        print(f"    ✗ SAM3 not installed: {e}")
+        print("      Install with: cd sam3_reference && pip install -e .")
     except Exception as e:
         print(f"    ✗ Segmenter initialization failed: {e}")
         import traceback

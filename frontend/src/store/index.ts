@@ -3,6 +3,10 @@ import { persist } from 'zustand/middleware';
 import type { SAM3Document, ZonePromptConfig, InferenceSettings } from '../types';
 
 interface AppState {
+  // Hydration status
+  _hasHydrated: boolean;
+  setHasHydrated: (state: boolean) => void;
+
   // Documents
   documents: SAM3Document[];
   selectedDocument: SAM3Document | null;
@@ -42,6 +46,10 @@ interface AppState {
 export const useStore = create<AppState>()(
   persist(
     (set) => ({
+      // Hydration status
+      _hasHydrated: false,
+      setHasHydrated: (state) => set({ _hasHydrated: state }),
+
       // Initial state - Documents
       documents: [],
       selectedDocument: null,
@@ -128,16 +136,35 @@ export const useStore = create<AppState>()(
     {
       name: 'sam3-storage',
       partialize: (state) => ({
-        documents: state.documents,
+        // Strip heavy data (mask_base64, crop_base64, imageUrl) from documents
+        // to avoid exceeding localStorage quota (~5MB limit)
+        documents: state.documents.map((doc) => ({
+          ...doc,
+          pages: doc.pages.map((page) => ({
+            ...page,
+            imageUrl: '', // Don't persist - fetched from backend
+            zones: page.zones.map((zone) => ({
+              ...zone,
+              mask_base64: null, // Don't persist - too large
+              crop_base64: null, // Don't persist - too large
+            })),
+          })),
+        })),
         // Persist config for offline access
         promptConfig: state.promptConfig,
         inferenceSettings: state.inferenceSettings,
         configVersion: state.configVersion,
         configLoaded: state.configLoaded,
       }),
+      onRehydrateStorage: () => (state) => {
+        state?.setHasHydrated(true);
+      },
     }
   )
 );
+
+// Hydration Selector
+export const useHasHydrated = () => useStore((state) => state._hasHydrated);
 
 // Document Selectors
 export const useDocuments = () => useStore((state) => state.documents);

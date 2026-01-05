@@ -6,3 +6,4 @@ export { PlaygroundCanvas } from './PlaygroundCanvas';
 export { PointOverlay } from './PointOverlay';
 export { BoxOverlay } from './BoxOverlay';
 export { MaskOverlay } from './MaskOverlay';
+export { SmartSelectPanel } from './SmartSelectPanel';

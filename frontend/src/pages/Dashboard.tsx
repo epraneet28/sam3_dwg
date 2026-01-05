@@ -26,7 +26,7 @@ export default function Dashboard() {
     setUploadError(null);
 
     try {
-      // 1. Upload file (mock - stores in localStorage)
+      // 1. Upload file to backend storage
       const { docId, totalPages } = await api.uploadDocument(file);
 
       // 2. Create document in store
@@ -46,16 +46,21 @@ export default function Dashboard() {
         const segmentResult = await api.segmentDocument(docId);
 
         // 4. Update document with segmentation results
-        updateDocument(docId, {
-          status: 'segmented',
-          configVersionUsed: configVersion, // Track which config was used
-          pages: segmentResult.pages.map((p) => ({
+        // Fetch image URLs asynchronously
+        const pages = await Promise.all(
+          segmentResult.pages.map(async (p) => ({
             pageNumber: p.pageNumber,
-            imageUrl: api.getPageImageUrl(docId, p.pageNumber),
+            imageUrl: await api.getPageImageUrl(docId, p.pageNumber),
             zones: p.zones,
             pageType: p.pageType,
             processingTimeMs: p.processingTimeMs,
-          })),
+          }))
+        );
+
+        updateDocument(docId, {
+          status: 'segmented',
+          configVersionUsed: configVersion, // Track which config was used
+          pages,
         });
 
         // 5. Navigate to viewer

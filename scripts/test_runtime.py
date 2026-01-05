@@ -176,7 +176,7 @@ def test_segmenter_init():
             print(f"  GPU: {torch.cuda.get_device_name(0)}")
             print(f"  GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
-        # Initialize segmenter (will use mock if model not available)
+        # Initialize segmenter (requires SAM3 to be installed)
         print("\n  Initializing DrawingSegmenter...")
         segmenter = DrawingSegmenter(model_path=model_path if model_exists else None)
 
@@ -184,14 +184,13 @@ def test_segmenter_init():
         print(f"✓ DrawingSegmenter initialized")
         print(f"  Model type: {model_type}")
         print(f"  Device: {segmenter.device}")
-
-        # Check if using mock
-        if "Mock" in model_type:
-            print("  ⚠ Using MockSAM3Model (real model not loaded)")
-        else:
-            print("  ✓ Using real SAM3 model")
+        print("  ✓ Using real SAM3 model")
 
         return True
+    except ImportError as e:
+        print(f"✗ SAM3 not installed: {e}")
+        print("  Install with: cd sam3_reference && pip install -e .")
+        return False
     except Exception as e:
         print(f"✗ Segmenter initialization FAILED: {e}")
         import traceback
