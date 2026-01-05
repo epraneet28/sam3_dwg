@@ -300,10 +300,12 @@ function calculateTolerance(
   // Base tolerance as percentage of image diagonal
   const diagonal = Math.sqrt(width * width + height * height);
 
-  // complexity 1 = minimal simplification (low tolerance)
+  // complexity 1 = NO simplification (tolerance = 0)
   // complexity 0 = maximum simplification (high tolerance)
-  const minTolerance = 1; // pixels
-  const maxTolerance = diagonal * 0.02; // 2% of diagonal
+  const minTolerance = 0; // pixels - changed from 1 to preserve 1-2px details at complexity 1.0
+  const maxTolerance = diagonal * 0.005; // 0.5% of diagonal (changed from 2%)
+  // NOTE: minTolerance changed to 0 so complexity 1.0 preserves ALL vertices.
+  // For a 2000x1500 image: maxTolerance=12.5px, at complexity 1.0 tolerance=0px
 
   return minTolerance + (1 - complexity) * (maxTolerance - minTolerance);
 }

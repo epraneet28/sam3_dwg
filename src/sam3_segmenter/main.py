@@ -57,6 +57,9 @@ from .models import (
     InteractiveSegmentRequest,
     InteractiveSegmentResponse,
     MaskCandidate,
+    FindSimilarRequest,
+    FindSimilarResponse,
+    SimilarRegion,
     # Document storage models
     DocumentUploadResponse,
     DocumentMetadata,
@@ -74,6 +77,7 @@ from .utils.mask_processing import (
     apply_non_overlapping_constraints,
     filter_masks_by_iou,
     sort_masks_by_combined_score,
+    sort_masks_by_area,
 )
 from .utils.debug_logging import create_debug_logger
 from .zone_classifier import post_process_zones
@@ -359,10 +363,10 @@ async def segment_interactive(request: InteractiveSegmentRequest):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     # Validate that at least one prompt type is provided
-    if not request.points and not request.box:
+    if not request.points and not request.box and not request.boxes:
         raise HTTPException(
             status_code=400,
-            detail="At least one prompt type (points or box) must be provided",
+            detail="At least one prompt type (points, box, or boxes) must be provided",
         )
 
     start_time = time.time()
@@ -492,8 +496,9 @@ async def segment_interactive(request: InteractiveSegmentRequest):
                     low_res_logits = all_logits if all_logits else []
                     # Recalculate bboxes for each mask
                     bboxes = []
+                    mask_thresh = settings.mask_binarization_threshold
                     for mask in masks:
-                        ys, xs = np.where(mask > 0.5 if mask.dtype in (np.float32, np.float64) else mask)
+                        ys, xs = np.where(mask > mask_thresh if mask.dtype in (np.float32, np.float64) else mask)
                         if len(xs) > 0:
                             bboxes.append((float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())))
                         else:
@@ -502,8 +507,9 @@ async def segment_interactive(request: InteractiveSegmentRequest):
                 else:
                     # Zone mode: Merge all masks using logical OR (union)
                     merged_mask = np.zeros_like(all_masks[0], dtype=bool)
+                    mask_thresh = settings.mask_binarization_threshold
                     for mask in all_masks:
-                        merged_mask = np.logical_or(merged_mask, mask > 0.5)
+                        merged_mask = np.logical_or(merged_mask, mask > mask_thresh)
                     avg_iou = sum(all_iou_scores) / len(all_iou_scores)
                     masks = [merged_mask.astype(np.float32)]
                     iou_scores = [avg_iou]
@@ -699,19 +705,93 @@ async def segment_interactive(request: InteractiveSegmentRequest):
         debug_logger.log_final_output(masks, iou_scores, final_bboxes)
 
         # =====================================================================
-        # Complexity-aware sorting (before building response)
+        # Mask candidate sorting (before building response)
         # =====================================================================
-        # In precision mode, use combined IoU + complexity score to favor
-        # more detailed masks over simple blobs for line drawings
-        if settings.enable_precision_mode and settings.enable_complexity_scoring and len(masks) > 1:
-            masks, iou_scores, final_bboxes, combined_scores, sorted_logits = sort_masks_by_combined_score(
-                masks, iou_scores, final_bboxes,
-                complexity_weight=settings.complexity_weight,
-                low_res_logits=low_res_logits,
-            )
-            # Update low_res_logits with sorted version (for correct refinement pairing)
-            if sorted_logits is not None:
-                low_res_logits = sorted_logits
+        # Sort candidates based on the configured selection mode
+        # This determines which mask appears first (and is auto-selected by frontend)
+        if len(masks) > 1 and settings.enable_precision_mode:
+            selection_mode = settings.mask_selection_mode
+            threshold = settings.mask_binarization_threshold
+            logger.info(f"Mask selection mode: {selection_mode}, threshold: {threshold}")
+
+            if selection_mode == "largest":
+                # Sort by area (largest first) - good for capturing grid bubbles
+                # Use same threshold for area calculation as for final mask binarization
+                masks, iou_scores, final_bboxes, _, sorted_logits = sort_masks_by_area(
+                    masks, iou_scores, final_bboxes,
+                    low_res_logits=low_res_logits,
+                    largest_first=True,
+                    threshold=threshold,
+                )
+                if sorted_logits is not None:
+                    low_res_logits = sorted_logits
+            elif selection_mode == "smallest":
+                # Sort by area (smallest first) - tightest fit
+                masks, iou_scores, final_bboxes, _, sorted_logits = sort_masks_by_area(
+                    masks, iou_scores, final_bboxes,
+                    low_res_logits=low_res_logits,
+                    largest_first=False,
+                    threshold=threshold,
+                )
+                if sorted_logits is not None:
+                    low_res_logits = sorted_logits
+            elif selection_mode == "combined" and settings.enable_complexity_scoring:
+                # Combined IoU + complexity scoring with component bonus
+                masks, iou_scores, final_bboxes, combined_scores, sorted_logits = sort_masks_by_combined_score(
+                    masks, iou_scores, final_bboxes,
+                    complexity_weight=settings.complexity_weight,
+                    low_res_logits=low_res_logits,
+                    component_bonus=settings.component_complexity_bonus,
+                    threshold=threshold,
+                )
+                if sorted_logits is not None:
+                    low_res_logits = sorted_logits
+            # else: "iou" mode - no sorting needed, SAM already returns by IoU
+
+        # =====================================================================
+        # Candidate Union Mode (merge top-k masks to capture edge details)
+        # =====================================================================
+        # Edge details like grid bubbles may only appear in secondary candidates
+        # Union mode ORs the top-k masks together to capture all details
+        if len(masks) > 1 and settings.enable_precision_mode and settings.enable_candidate_union:
+            topk = min(settings.candidate_union_topk, len(masks))
+            logger.info(f"Candidate union mode: merging top {topk} masks")
+
+            # Convert masks to binary at threshold
+            threshold = settings.mask_binarization_threshold
+            binary_masks = []
+            for m in masks[:topk]:
+                if m.dtype == bool:
+                    binary_masks.append(m)
+                elif m.dtype in (np.float32, np.float64):
+                    binary_masks.append(m > threshold)
+                else:
+                    binary_masks.append(m > 127)
+
+            # Union (OR) the top-k masks
+            merged_mask = binary_masks[0].copy()
+            for bm in binary_masks[1:]:
+                merged_mask = np.logical_or(merged_mask, bm)
+
+            # Average the IoU scores of merged candidates
+            avg_iou = sum(iou_scores[:topk]) / topk
+
+            # Recalculate bbox from merged mask
+            if merged_mask.any():
+                ys, xs = np.where(merged_mask)
+                merged_bbox = (float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max()))
+            else:
+                merged_bbox = final_bboxes[0] if final_bboxes else (0.0, 0.0, 0.0, 0.0)
+
+            # Replace with merged result (keep original candidates after for reference)
+            masks = [merged_mask] + masks  # Merged first, then originals
+            iou_scores = [avg_iou] + iou_scores
+            final_bboxes = [merged_bbox] + final_bboxes
+            # For logits, use the first candidate's logits (most confident)
+            if low_res_logits:
+                low_res_logits = [low_res_logits[0]] + low_res_logits
+
+            logger.info(f"Merged mask: {np.sum(merged_mask)} pixels, avg IoU: {avg_iou:.3f}")
 
         # =====================================================================
         # Build response with mask candidates
@@ -719,16 +799,53 @@ async def segment_interactive(request: InteractiveSegmentRequest):
         mask_candidates = []
         for i, (mask, iou_score, bbox) in enumerate(zip(masks, iou_scores, final_bboxes)):
             # Convert mask to base64 PNG - handle bool, float, and uint8 dtypes
+            # Use configurable threshold instead of hardcoded 0.5
+            threshold = settings.mask_binarization_threshold
             if mask.dtype == bool:
                 mask_uint8 = (mask * 255).astype("uint8")
             elif mask.dtype in (np.float32, np.float64):
-                # Float masks: threshold at 0.5 and convert to uint8
-                mask_uint8 = ((mask > 0.5) * 255).astype("uint8")
+                # Float masks: threshold at configurable value (default 0.5)
+                # Lower threshold captures more uncertain edge pixels
+                mask_uint8 = ((mask > threshold) * 255).astype("uint8")
             else:
                 # Assume uint8, but ensure 0-255 range
                 mask_uint8 = mask.astype("uint8")
                 if mask_uint8.max() <= 1:
                     mask_uint8 = mask_uint8 * 255
+
+            # Optional precision dilation to capture boundary pixels
+            if use_precision_mode and settings.enable_precision_dilation:
+                try:
+                    import cv2
+                    dilation_px = settings.precision_dilation_pixels
+                    kernel = cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE,
+                        (dilation_px * 2 + 1, dilation_px * 2 + 1)
+                    )
+                    mask_uint8 = cv2.dilate(mask_uint8, kernel, iterations=1)
+                    logger.debug(f"Applied {dilation_px}px dilation to mask {i}")
+                except ImportError:
+                    logger.warning("cv2 not available for precision dilation")
+
+            # Optional precision smoothing (morphological closing) for smoother edges
+            # This mimics Roboflow's smooth boundary output
+            if use_precision_mode and settings.enable_precision_smoothing:
+                try:
+                    import cv2
+                    smooth_kernel_size = settings.precision_smoothing_kernel
+                    # Ensure odd kernel size
+                    if smooth_kernel_size % 2 == 0:
+                        smooth_kernel_size += 1
+                    smooth_kernel = cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE,
+                        (smooth_kernel_size, smooth_kernel_size)
+                    )
+                    # Morphological closing: dilate then erode (fills gaps, smooths edges)
+                    mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, smooth_kernel)
+                    logger.debug(f"Applied {smooth_kernel_size}px smoothing to mask {i}")
+                except ImportError:
+                    logger.warning("cv2 not available for precision smoothing")
+
             mask_img = PILImage.fromarray(mask_uint8)
             buffer = io.BytesIO()
             mask_img.save(buffer, format="PNG")
@@ -756,9 +873,10 @@ async def segment_interactive(request: InteractiveSegmentRequest):
                 )
             )
 
-        # Sort mask candidates (if not already sorted by complexity scoring above)
-        # Complexity-aware sorting is done earlier when precision_mode + complexity_scoring
-        if not (settings.enable_precision_mode and settings.enable_complexity_scoring):
+        # Sort mask candidates (if not already sorted by selection mode above)
+        # In precision mode, sorting is done earlier based on mask_selection_mode
+        # Only apply fallback IoU sort when NOT in precision mode
+        if not settings.enable_precision_mode:
             # Default: Sort by IoU score only (best first)
             mask_candidates.sort(key=lambda m: m.iou_score, reverse=True)
 
@@ -781,6 +899,149 @@ async def segment_interactive(request: InteractiveSegmentRequest):
         debug_logger.save()  # Save debug log even on error
         logger.error(f"Interactive segmentation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Segmentation failed: {str(e)}")
+
+
+# =============================================================================
+# Find Similar Endpoint
+# =============================================================================
+
+
+@app.post("/segment/find-similar", response_model=FindSimilarResponse)
+async def segment_find_similar(request: FindSimilarRequest):
+    """
+    Find and segment regions similar to an exemplar mask.
+
+    Given an exemplar mask (from previous segmentation), this endpoint:
+    1. Extracts SAM3 backbone features for the masked region
+    2. Scans the image using a grid-based approach at multiple scales
+    3. Computes cosine similarity with the exemplar features
+    4. Filters by similarity threshold and applies NMS
+    5. Runs SAM3 segmentation on each similar region
+
+    Returns separate masks for each similar region, allowing the user
+    to select individual objects.
+    """
+    if segmenter is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    if not settings.enable_find_similar:
+        raise HTTPException(
+            status_code=400,
+            detail="Find similar feature is disabled",
+        )
+
+    start_time = time.time()
+
+    # Setup debug logging
+    storage_path = None
+    if request.doc_id:
+        storage = _get_storage()
+        if storage.document_exists(request.doc_id):
+            storage_path = storage.get_document_dir(request.doc_id)
+    debug_logger = create_debug_logger(storage_path=storage_path)
+
+    try:
+        # Decode image
+        image = decode_base64_image(request.image_base64)
+        img_width, img_height = image.size
+    except ValueError as e:
+        debug_logger.log_error(e, "image_decode")
+        raise HTTPException(status_code=400, detail=f"Invalid image: {str(e)}")
+
+    try:
+        # Decode exemplar mask
+        import io as io_module
+
+        mask_bytes = base64.b64decode(request.exemplar_mask_base64)
+        mask_img = Image.open(io_module.BytesIO(mask_bytes)).convert("L")
+        exemplar_mask = np.array(mask_img) > 127
+    except Exception as e:
+        debug_logger.log_error(e, "mask_decode")
+        raise HTTPException(status_code=400, detail=f"Invalid mask: {str(e)}")
+
+    # Compute exemplar bbox if not provided
+    exemplar_bbox = request.exemplar_bbox
+    if exemplar_bbox is None:
+        ys, xs = np.where(exemplar_mask)
+        if len(xs) == 0:
+            raise HTTPException(status_code=400, detail="Empty exemplar mask")
+        exemplar_bbox = (
+            float(xs.min()),
+            float(ys.min()),
+            float(xs.max()),
+            float(ys.max()),
+        )
+
+    try:
+        # Run find similar
+        results, regions_scanned, regions_above_threshold = segmenter.find_similar(
+            image=image,
+            exemplar_mask=exemplar_mask,
+            exemplar_bbox=exemplar_bbox,
+            max_results=request.max_results,
+            similarity_threshold=request.similarity_threshold,
+            nms_threshold=request.nms_threshold,
+            grid_stride=request.grid_stride,
+            scale_factors=settings.find_similar_scale_factors,
+            feature_level=settings.find_similar_feature_level,
+        )
+
+        # Convert results to response format
+        regions = []
+        for result in results:
+            # Encode mask to base64 PNG
+            mask = result["mask"]
+            if mask.dtype == bool:
+                mask_uint8 = (mask * 255).astype(np.uint8)
+            else:
+                mask_uint8 = ((mask > settings.mask_binarization_threshold) * 255).astype(np.uint8)
+            mask_img = Image.fromarray(mask_uint8)
+            buffer = io_module.BytesIO()
+            mask_img.save(buffer, format="PNG")
+            mask_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+            # Encode low-res logits if available
+            logits_base64 = None
+            if result.get("low_res_logits") is not None:
+                logits = result["low_res_logits"]
+                if logits.ndim == 2:
+                    logits = logits[np.newaxis, :, :]
+                logits = logits.astype(np.float32)
+                logits_buffer = io_module.BytesIO()
+                np.save(logits_buffer, logits)
+                logits_base64 = base64.b64encode(logits_buffer.getvalue()).decode("utf-8")
+
+            regions.append(
+                SimilarRegion(
+                    region_id=result["region_id"],
+                    mask_base64=mask_base64,
+                    bbox=tuple(result["bbox"]),
+                    similarity_score=result["similarity"],
+                    iou_score=result.get("iou_score"),
+                    low_res_logits_base64=logits_base64,
+                )
+            )
+
+        processing_time = (time.time() - start_time) * 1000
+
+        logger.info(
+            f"find_similar: found {len(regions)} similar regions "
+            f"in {processing_time:.0f}ms"
+        )
+
+        return FindSimilarResponse(
+            regions=regions,
+            exemplar_bbox=exemplar_bbox,
+            image_size=(img_width, img_height),
+            processing_time_ms=processing_time,
+            regions_scanned=regions_scanned,
+            regions_above_threshold=regions_above_threshold,
+        )
+
+    except Exception as e:
+        debug_logger.log_error(e, "find_similar")
+        logger.error(f"Find similar failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Find similar failed: {str(e)}")
 
 
 @app.get("/health", response_model=HealthResponse)

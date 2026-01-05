@@ -17,6 +17,7 @@ import type {
   DocumentMetadata,
   DocumentListResponse,
   DocumentDetailResponse,
+  FindSimilarResponse,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001';
@@ -139,6 +140,7 @@ export const api = {
       boxes?: Array<[number, number, number, number]>; // Multi-box (merged into single mask)
       maskInput?: string; // Base64 encoded binarized mask (legacy mode)
       maskLogits?: string; // Base64 encoded low-res logits (preferred for refinement)
+      docId?: string; // Document ID for debug logging
     }
   ): Promise<InteractiveSegmentResponse> {
     const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
@@ -152,7 +154,40 @@ export const api = {
       mask_logits_base64: options.maskLogits,
       mask_input_base64: options.maskLogits ? undefined : options.maskInput,
       multimask_output: true,
+      // Send doc_id for debug logging (optional)
+      doc_id: options.docId,
     });
+    return data;
+  },
+
+  /**
+   * Find and segment regions similar to an exemplar mask.
+   * Returns separate masks for each similar region.
+   */
+  async segmentFindSimilar(
+    imageBase64: string,
+    exemplarMaskBase64: string,
+    options?: {
+      exemplarBbox?: [number, number, number, number];
+      maxResults?: number;
+      similarityThreshold?: number;
+      docId?: string;
+    }
+  ): Promise<FindSimilarResponse> {
+    const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const maskData = exemplarMaskBase64.replace(/^data:image\/\w+;base64,/, '');
+
+    const { data } = await apiClient.post<FindSimilarResponse>(
+      '/segment/find-similar',
+      {
+        image_base64: base64Data,
+        exemplar_mask_base64: maskData,
+        exemplar_bbox: options?.exemplarBbox,
+        max_results: options?.maxResults ?? 10,
+        similarity_threshold: options?.similarityThreshold ?? 0.7,
+        doc_id: options?.docId,
+      }
+    );
     return data;
   },
 

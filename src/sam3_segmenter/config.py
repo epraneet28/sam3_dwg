@@ -127,7 +127,74 @@ class Settings(BaseSettings):
     # Complexity-based candidate scoring (alternative to IoU-only)
     # For line drawings, more complex masks (higher perimeter/area) are often better
     enable_complexity_scoring: bool = True    # Use complexity in candidate ranking
-    complexity_weight: float = 0.3            # Weight for complexity vs IoU (0-1)
+    complexity_weight: float = 0.5            # Weight for complexity vs IoU (0-1)
+    # NOTE: Changed from 0.3 to 0.5 to better preserve boundary details in engineering drawings.
+    # At 0.3, "filled" masks with higher IoU were winning over detailed boundary masks.
+    # At 0.5, complexity (perimeter/sqrt(area)) is weighted equally with IoU.
+
+    # ==========================================================================
+    # Mask Candidate Selection Strategy
+    # ==========================================================================
+    # SAM3 returns multiple mask candidates. This controls which one is preferred:
+    # - "iou": Select by IoU score only (SAM3's confidence)
+    # - "combined": Use IoU + complexity scoring (current behavior)
+    # - "largest": Prefer candidate with most pixels (captures grid bubbles, annotations)
+    # - "smallest": Prefer candidate with fewest pixels (tightest fit)
+    # For engineering drawings with grid bubbles, "largest" often works best
+    mask_selection_mode: str = "largest"
+
+    # Component bonus for complexity scoring (rewards disjoint regions like grid bubbles)
+    # Added to complexity score: complexity + component_bonus * num_components
+    # Set to 0 to disable component bonus
+    component_complexity_bonus: float = 0.5
+
+    # ==========================================================================
+    # Mask Output Settings (affects boundary precision)
+    # ==========================================================================
+    # Mask binarization threshold for float masks (0.0-1.0)
+    # Lower values include more uncertain edge pixels, higher values are stricter
+    # Default changed to 0.35 to capture more edge pixels (grid bubbles, annotations)
+    # SAM3 standard is 0.5; lower values help with thin lines and boundary details
+    mask_binarization_threshold: float = 0.35
+
+    # Precision mode mask dilation (expands mask boundaries to capture edge pixels)
+    # When enabled, applies small morphological dilation AFTER SAM inference
+    # This helps capture boundary details that SAM's internal threshold might miss
+    enable_precision_dilation: bool = False   # Disabled by default
+    precision_dilation_pixels: int = 2        # Pixels to expand mask boundary
+
+    # Precision mode smoothing (morphological closing after dilation)
+    # Applies closing to smooth jagged edges and fill small gaps between components
+    # This mimics Roboflow's smoother boundary output
+    enable_precision_smoothing: bool = False  # Disabled by default
+    precision_smoothing_kernel: int = 5       # Kernel size for closing (odd number)
+
+    # Union mode: merge top-k mask candidates instead of selecting one
+    # This captures edge details that may only appear in secondary candidates
+    # e.g., grid bubbles might be in candidate #2 while main area is in #1
+    enable_candidate_union: bool = False      # Disabled by default
+    candidate_union_topk: int = 2             # Number of top candidates to merge (2-3)
+
+    # ==========================================================================
+    # Find Similar Settings
+    # ==========================================================================
+    # Enables "Find Similar" feature that searches for objects similar to a
+    # selected region using SAM3's backbone feature embeddings.
+
+    enable_find_similar: bool = True
+
+    # Search parameters
+    find_similar_default_threshold: float = 0.7    # Cosine similarity threshold
+    find_similar_max_results: int = 10             # Maximum results to return
+    find_similar_grid_stride: int = 32             # Grid stride for scanning
+    find_similar_nms_threshold: float = 0.5        # NMS IoU threshold
+
+    # Feature extraction settings
+    find_similar_feature_level: int = 1            # FPN level (0=288x288, 1=144x144, 2=72x72)
+    find_similar_pool_size: int = 7                # RoI pooling output size
+
+    # Scale search: check multiple scales relative to exemplar
+    find_similar_scale_factors: list[float] = [0.5, 0.75, 1.0, 1.25, 1.5]
 
     # Document storage directory (for uploaded images)
     documents_dir: str = "./storage"

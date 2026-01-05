@@ -58,10 +58,14 @@ export function MaskOverlay({
     };
   }, [containerRef, imageDimensions]);
 
-  // Generate SVG path for polygon
-  const polygonPath = useMemo(() => {
-    if (!polygon || polygon.points.length < 3) return '';
-    return polygonToSvgPath(polygon.points);
+  // Generate SVG paths for all polygon contours (including disjoint regions like grid bubbles)
+  const allPolygonPaths = useMemo(() => {
+    if (!polygon) return [];
+    // If we have allContours, use them; otherwise fall back to primary points
+    const contours = polygon.allContours || [{ points: polygon.points, area: polygon.area, perimeter: polygon.perimeter }];
+    return contours
+      .filter(c => c.points.length >= 3)
+      .map(c => polygonToSvgPath(c.points));
   }, [polygon]);
 
   // Decode base64 mask to image
@@ -185,15 +189,18 @@ export function MaskOverlay({
             height: '100%',
           }}
         >
-          {/* Polygon fill */}
-          <path
-            d={polygonPath}
-            fill={maskColor}
-            fillOpacity={maskOpacity}
-            stroke={maskColor}
-            strokeWidth={2 / zoom}
-            strokeLinejoin="round"
-          />
+          {/* Polygon fill - render ALL contours (including disjoint regions like grid bubbles) */}
+          {allPolygonPaths.map((path, idx) => (
+            <path
+              key={idx}
+              d={path}
+              fill={maskColor}
+              fillOpacity={maskOpacity}
+              stroke={maskColor}
+              strokeWidth={2 / zoom}
+              strokeLinejoin="round"
+            />
+          ))}
 
           {/* Polygon vertices */}
           {showPolygonVertices && polygon.points.map((point, idx) => (

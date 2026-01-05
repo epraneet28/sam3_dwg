@@ -229,6 +229,34 @@ export interface InteractiveSegmentResponse {
 }
 
 // ============================================================================
+// Find Similar Types
+// ============================================================================
+
+/**
+ * A single similar region found by find-similar.
+ */
+export interface SimilarRegion {
+  region_id: string;
+  mask_base64: string;
+  bbox: [number, number, number, number];
+  similarity_score: number;
+  iou_score: number | null;
+  low_res_logits_base64: string | null;
+}
+
+/**
+ * Response from find-similar endpoint.
+ */
+export interface FindSimilarResponse {
+  regions: SimilarRegion[];
+  exemplar_bbox: [number, number, number, number];
+  image_size: [number, number];
+  processing_time_ms: number;
+  regions_scanned: number;
+  regions_above_threshold: number;
+}
+
+// ============================================================================
 // Smart Select Types (Roboflow-style features)
 // ============================================================================
 
@@ -247,15 +275,31 @@ export type SmartSelectState =
   | 'confirmed';  // User confirmed selection (Enter)
 
 /**
- * A polygon extracted from a mask
+ * A single polygon contour
  */
-export interface PolygonData {
+export interface PolygonContour {
   /** Simplified polygon vertices */
   points: Array<{ x: number; y: number }>;
   /** Area in pixels */
   area: number;
   /** Perimeter in pixels */
   perimeter: number;
+}
+
+/**
+ * Polygon data extracted from a mask - supports multiple contours
+ */
+export interface PolygonData {
+  /** Primary polygon vertices (largest contour for backwards compatibility) */
+  points: Array<{ x: number; y: number }>;
+  /** Area in pixels (of primary contour) */
+  area: number;
+  /** Perimeter in pixels (of primary contour) */
+  perimeter: number;
+  /** All polygon contours including disjoint regions (grid bubbles, etc.) */
+  allContours?: PolygonContour[];
+  /** Total area across all contours */
+  totalArea?: number;
 }
 
 /**

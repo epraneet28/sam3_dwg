@@ -927,7 +927,7 @@ def filter_masks_by_iou(
 # =============================================================================
 
 
-def compute_mask_complexity(mask: np.ndarray) -> float:
+def compute_mask_complexity(mask: np.ndarray, threshold: float = 0.35) -> float:
     """
     Compute complexity score for a mask based on perimeter-to-area ratio.
 
@@ -936,6 +936,7 @@ def compute_mask_complexity(mask: np.ndarray) -> float:
 
     Args:
         mask: Binary mask (2D, bool or uint8)
+        threshold: Binarization threshold for float masks (default 0.35 to match config)
 
     Returns:
         Complexity score (higher = more complex/detailed)
@@ -946,11 +947,11 @@ def compute_mask_complexity(mask: np.ndarray) -> float:
     if not CV2_AVAILABLE:
         return 0.0
 
-    # Convert to uint8 if needed
+    # Convert to uint8 if needed, using configurable threshold
     if mask.dtype == bool:
         mask_uint8 = mask.astype(np.uint8) * 255
     elif mask.dtype in (np.float32, np.float64):
-        mask_uint8 = ((mask > 0.5) * 255).astype(np.uint8)
+        mask_uint8 = ((mask > threshold) * 255).astype(np.uint8)  # Use configurable threshold
     else:
         mask_uint8 = mask.astype(np.uint8)
         if mask_uint8.max() <= 1:
@@ -980,6 +981,8 @@ def compute_combined_score(
     iou_score: float,
     mask: np.ndarray,
     complexity_weight: float = 0.3,
+    component_bonus: float = 0.0,
+    threshold: float = 0.35,
 ) -> float:
     """
     Compute combined score using IoU and complexity.
@@ -991,15 +994,37 @@ def compute_combined_score(
         iou_score: SAM's predicted IoU score (0-1)
         mask: Binary mask for complexity computation
         complexity_weight: Weight for complexity vs IoU (0-1, default 0.3)
+        component_bonus: Bonus per connected component (rewards disjoint regions)
+        threshold: Binarization threshold for float masks (default 0.35 to match config)
 
     Returns:
         Combined score for ranking (higher = better)
     """
-    complexity = compute_mask_complexity(mask)
+    complexity = compute_mask_complexity(mask, threshold)
 
     # Normalize complexity to roughly 0-1 range
     # Typical values: circle ~3.5, square ~4.0, complex shape ~6-10+
     normalized_complexity = min(complexity / 10.0, 1.0)
+
+    # Add bonus for multiple connected components (grid bubbles, annotations)
+    if component_bonus > 0 and CV2_AVAILABLE:
+        # Convert to uint8 for connected components analysis, using configurable threshold
+        if mask.dtype == bool:
+            mask_uint8 = mask.astype(np.uint8) * 255
+        elif mask.dtype in (np.float32, np.float64):
+            mask_uint8 = ((mask > threshold) * 255).astype(np.uint8)  # Use configurable threshold
+        else:
+            mask_uint8 = mask.astype(np.uint8)
+            if mask_uint8.max() <= 1:
+                mask_uint8 = mask_uint8 * 255
+
+        num_components, _ = cv2.connectedComponents(mask_uint8)
+        # num_components includes background (0), so actual components = num_components - 1
+        actual_components = max(0, num_components - 1)
+        # Bonus is normalized: 1 component = 0, 2 = bonus, 3 = 2*bonus, etc.
+        component_score = component_bonus * max(0, actual_components - 1) / 5.0  # Normalize to ~0-1
+        normalized_complexity = min(normalized_complexity + component_score, 1.0)
+        logger.debug(f"Component bonus: {actual_components} components, bonus={component_score:.3f}")
 
     # Combine: (1-w)*IoU + w*complexity
     # With w=0.3: 70% IoU, 30% complexity
@@ -1019,6 +1044,8 @@ def sort_masks_by_combined_score(
     boxes: list[tuple],
     complexity_weight: float = 0.3,
     low_res_logits: Optional[list] = None,
+    component_bonus: float = 0.0,
+    threshold: float = 0.35,
 ) -> tuple[list[np.ndarray], list[float], list[tuple], list[float], Optional[list]]:
     """
     Sort mask candidates by combined IoU + complexity score.
@@ -1029,6 +1056,8 @@ def sort_masks_by_combined_score(
         boxes: List of bounding boxes
         complexity_weight: Weight for complexity (default 0.3)
         low_res_logits: Optional list of low-res logits for refinement
+        component_bonus: Bonus for masks with multiple connected components
+        threshold: Binarization threshold for float masks (default 0.35 to match config)
 
     Returns:
         Tuple of (sorted_masks, sorted_ious, sorted_boxes, combined_scores, sorted_logits)
@@ -1037,9 +1066,9 @@ def sort_masks_by_combined_score(
     if len(masks) == 0:
         return masks, iou_scores, boxes, [], low_res_logits
 
-    # Compute combined scores
+    # Compute combined scores using configurable threshold
     combined_scores = [
-        compute_combined_score(iou, mask, complexity_weight)
+        compute_combined_score(iou, mask, complexity_weight, component_bonus, threshold)
         for iou, mask in zip(iou_scores, masks)
     ]
 
@@ -1066,3 +1095,67 @@ def sort_masks_by_combined_score(
     )
 
     return sorted_masks, sorted_ious, sorted_boxes, sorted_combined, sorted_logits
+
+
+def sort_masks_by_area(
+    masks: list[np.ndarray],
+    iou_scores: list[float],
+    boxes: list[tuple],
+    low_res_logits: Optional[list] = None,
+    largest_first: bool = True,
+    threshold: float = 0.35,
+) -> tuple[list[np.ndarray], list[float], list[tuple], list[int], Optional[list]]:
+    """
+    Sort mask candidates by pixel area.
+
+    This mode is useful for engineering drawings where the largest candidate
+    typically includes grid bubbles, annotations, and other peripheral elements.
+
+    Args:
+        masks: List of binary masks
+        iou_scores: List of IoU scores
+        boxes: List of bounding boxes
+        low_res_logits: Optional list of low-res logits for refinement
+        largest_first: If True, sort largest first (default); if False, smallest first
+        threshold: Binarization threshold for float masks (default 0.35 to match config)
+
+    Returns:
+        Tuple of (sorted_masks, sorted_ious, sorted_boxes, areas, sorted_logits)
+    """
+    if len(masks) == 0:
+        return masks, iou_scores, boxes, [], low_res_logits
+
+    # Compute areas using configurable threshold (matches mask_binarization_threshold)
+    areas = []
+    for mask in masks:
+        if mask.dtype == bool:
+            area = np.sum(mask)
+        elif mask.dtype in (np.float32, np.float64):
+            area = np.sum(mask > threshold)  # Use configurable threshold, not hardcoded 0.5
+        else:
+            area = np.sum(mask > 0)
+        areas.append(int(area))
+
+    # Sort by area
+    sorted_indices = sorted(
+        range(len(masks)),
+        key=lambda i: areas[i],
+        reverse=largest_first
+    )
+
+    sorted_masks = [masks[i] for i in sorted_indices]
+    sorted_ious = [iou_scores[i] for i in sorted_indices]
+    sorted_boxes = [boxes[i] for i in sorted_indices]
+    sorted_areas = [areas[i] for i in sorted_indices]
+
+    sorted_logits = None
+    if low_res_logits is not None and len(low_res_logits) == len(masks):
+        sorted_logits = [low_res_logits[i] for i in sorted_indices]
+
+    mode = "largest" if largest_first else "smallest"
+    logger.info(
+        f"Area-based sorting ({mode} first): reordered {len(masks)} candidates, "
+        f"areas={sorted_areas}"
+    )
+
+    return sorted_masks, sorted_ious, sorted_boxes, sorted_areas, sorted_logits

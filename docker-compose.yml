@@ -15,6 +15,21 @@ services:
       - SAM3_EXEMPLARS_DIR=/app/exemplars
       - SAM3_LOG_LEVEL=INFO
       - SAM3_CORS_ORIGINS=["http://localhost:3000", "http://localhost:3005", "http://localhost:3006", "http://localhost:3007", "http://localhost:8000"]
+      # Precision mode settings for Smart Select / engineering drawings
+      - SAM3_ENABLE_PRECISION_MODE=true
+      - SAM3_MASK_SELECTION_MODE=largest
+      - SAM3_MASK_BINARIZATION_THRESHOLD=0.25
+      - SAM3_COMPONENT_COMPLEXITY_BONUS=0.5
+      - SAM3_ENABLE_DEBUG_LOGGING=true
+      # Expand mask boundaries to capture nearby grid bubbles/annotations
+      - SAM3_ENABLE_PRECISION_DILATION=true
+      - SAM3_PRECISION_DILATION_PIXELS=4
+      # Smooth edges like Roboflow (morphological closing)
+      - SAM3_ENABLE_PRECISION_SMOOTHING=true
+      - SAM3_PRECISION_SMOOTHING_KERNEL=5
+      # Merge top-k candidates to capture edge details in secondary masks
+      - SAM3_ENABLE_CANDIDATE_UNION=true
+      - SAM3_CANDIDATE_UNION_TOPK=2
     volumes:
       # Mount model weights from host
       - ./models:/app/models:ro
@@ -54,6 +69,18 @@ services:
       - SAM3_MODEL_PATH=/app/models/sam3.pt
       - SAM3_DEFAULT_CONFIDENCE_THRESHOLD=0.3
       - SAM3_LOG_LEVEL=DEBUG
+      # Precision mode settings (same as production)
+      - SAM3_ENABLE_PRECISION_MODE=true
+      - SAM3_MASK_SELECTION_MODE=largest
+      - SAM3_MASK_BINARIZATION_THRESHOLD=0.25
+      - SAM3_COMPONENT_COMPLEXITY_BONUS=0.5
+      - SAM3_ENABLE_DEBUG_LOGGING=true
+      - SAM3_ENABLE_PRECISION_DILATION=true
+      - SAM3_PRECISION_DILATION_PIXELS=4
+      - SAM3_ENABLE_PRECISION_SMOOTHING=true
+      - SAM3_PRECISION_SMOOTHING_KERNEL=5
+      - SAM3_ENABLE_CANDIDATE_UNION=true
+      - SAM3_CANDIDATE_UNION_TOPK=2
     volumes:
       - ./models:/app/models:ro
       - ./exemplars:/app/exemplars

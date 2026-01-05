@@ -16,12 +16,15 @@ import {
   ArrowUturnRightIcon,
   TrashIcon,
   CheckIcon,
+  MagnifyingGlassIcon,
+  ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import type {
   SmartSelectOutputMode,
   SmartSelectState,
   MaskCandidate,
   PolygonData,
+  SimilarRegion,
 } from '../../types';
 
 interface SmartSelectPanelProps {
@@ -53,6 +56,13 @@ interface SmartSelectPanelProps {
   onDelete: () => void;
   onFinish: () => void;
   isRunning?: boolean;
+
+  // Find Similar
+  onFindSimilar?: () => void;
+  isFindingSimilar?: boolean;
+  similarRegions?: SimilarRegion[];
+  onSelectSimilarRegion?: (index: number) => void;
+  selectedSimilarIndex?: number | null;
 }
 
 export function SmartSelectPanel({
@@ -75,6 +85,11 @@ export function SmartSelectPanel({
   onDelete,
   onFinish,
   isRunning = false,
+  onFindSimilar,
+  isFindingSimilar = false,
+  similarRegions = [],
+  onSelectSimilarRegion,
+  selectedSimilarIndex = null,
 }: SmartSelectPanelProps) {
   // Keyboard shortcuts
   useEffect(() => {
@@ -295,6 +310,60 @@ export function SmartSelectPanel({
           <div className="flex items-center justify-between px-3 py-2 bg-emerald-900/20 border border-emerald-500/30 rounded-lg">
             <span className="text-xs text-emerald-300">{selectionStats.label}</span>
             <span className="text-xs text-emerald-400 font-mono">{selectionStats.detail}</span>
+          </div>
+        )}
+
+        {/* Find Similar Button */}
+        {currentMask && onFindSimilar && (
+          <button
+            onClick={onFindSimilar}
+            disabled={isFindingSimilar || isRunning}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-purple-600 hover:bg-purple-700 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg text-sm font-medium transition-colors"
+            title="Find similar objects on this page"
+          >
+            {isFindingSimilar ? (
+              <>
+                <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                Searching...
+              </>
+            ) : (
+              <>
+                <MagnifyingGlassIcon className="w-4 h-4" />
+                Find Similar
+              </>
+            )}
+          </button>
+        )}
+
+        {/* Similar Regions Results */}
+        {similarRegions.length > 0 && (
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-[10px] uppercase tracking-wide text-slate-500">
+                Similar Regions
+              </label>
+              <span className="text-xs text-purple-400">
+                {similarRegions.length} found
+              </span>
+            </div>
+            <div className="space-y-1 max-h-40 overflow-y-auto">
+              {similarRegions.map((region, idx) => (
+                <button
+                  key={region.region_id}
+                  onClick={() => onSelectSimilarRegion?.(idx)}
+                  className={`w-full flex items-center justify-between px-2 py-1.5 rounded text-xs transition-colors ${
+                    selectedSimilarIndex === idx
+                      ? 'bg-purple-600 text-white'
+                      : 'bg-slate-700/50 text-slate-400 hover:bg-slate-700 hover:text-white'
+                  }`}
+                >
+                  <span>Region {idx + 1}</span>
+                  <span className="font-mono">
+                    {(region.similarity_score * 100).toFixed(0)}% match
+                  </span>
+                </button>
+              ))}
+            </div>
           </div>
         )}
 

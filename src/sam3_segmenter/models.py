@@ -407,6 +407,91 @@ class InteractiveSegmentResponse(BaseModel):
 
 
 # =============================================================================
+# Find Similar Models
+# =============================================================================
+
+
+class FindSimilarRequest(BaseModel):
+    """Request for finding similar regions to an exemplar mask."""
+
+    image_base64: str = Field(..., description="Base64 encoded image")
+    exemplar_mask_base64: str = Field(
+        ...,
+        description="Base64 encoded binary mask (PNG) of the exemplar region",
+    )
+    exemplar_bbox: Optional[tuple[float, float, float, float]] = Field(
+        None,
+        description="Bounding box [x1, y1, x2, y2] of exemplar (computed from mask if not provided)",
+    )
+    max_results: int = Field(
+        10,
+        ge=1,
+        le=50,
+        description="Maximum number of similar regions to return",
+    )
+    similarity_threshold: float = Field(
+        0.7,
+        ge=0.0,
+        le=1.0,
+        description="Minimum cosine similarity threshold",
+    )
+    nms_threshold: float = Field(
+        0.5,
+        ge=0.0,
+        le=1.0,
+        description="IoU threshold for Non-Maximum Suppression",
+    )
+    grid_stride: int = Field(
+        32,
+        ge=8,
+        le=128,
+        description="Stride for grid-based region scanning",
+    )
+    doc_id: Optional[str] = Field(
+        None,
+        description="Document ID for debug logging",
+    )
+
+
+class SimilarRegion(BaseModel):
+    """A single similar region found by find-similar."""
+
+    region_id: str = Field(..., description="Unique identifier for this region")
+    mask_base64: str = Field(..., description="Base64 encoded binary mask (PNG)")
+    bbox: tuple[float, float, float, float] = Field(
+        ..., description="Bounding box [x1, y1, x2, y2]"
+    )
+    similarity_score: float = Field(
+        ..., ge=0.0, le=1.0, description="Cosine similarity to exemplar"
+    )
+    iou_score: Optional[float] = Field(
+        None, description="SAM's predicted IoU score for this mask"
+    )
+    low_res_logits_base64: Optional[str] = Field(
+        None,
+        description="Base64 encoded low-res logits for refinement",
+    )
+
+
+class FindSimilarResponse(BaseModel):
+    """Response from find-similar endpoint."""
+
+    regions: list[SimilarRegion] = Field(
+        default_factory=list,
+        description="List of similar regions, sorted by similarity (best first)",
+    )
+    exemplar_bbox: tuple[float, float, float, float] = Field(
+        ..., description="Bounding box of the exemplar region"
+    )
+    image_size: tuple[int, int] = Field(..., description="[width, height] of input image")
+    processing_time_ms: float = Field(..., description="Processing time in milliseconds")
+    regions_scanned: int = Field(..., description="Number of candidate regions scanned")
+    regions_above_threshold: int = Field(
+        ..., description="Regions above similarity threshold before NMS"
+    )
+
+
+# =============================================================================
 # Document Storage Models (for Playground)
 # =============================================================================
 

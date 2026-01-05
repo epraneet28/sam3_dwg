@@ -46,6 +46,7 @@ import type {
   PointPromptMode,
   BoxPromptMode,
   MaskCandidate,
+  SimilarRegion,
 } from '../types';
 
 type InputMode = 'text' | 'box' | 'points';
@@ -119,6 +120,11 @@ export default function Playground() {
       setSelectedMaskIndex(0);
     },
   });
+
+  // Find Similar state
+  const [similarRegions, setSimilarRegions] = useState<SimilarRegion[]>([]);
+  const [selectedSimilarIndex, setSelectedSimilarIndex] = useState<number | null>(null);
+  const [isFindingSimilar, setIsFindingSimilar] = useState(false);
 
   // Saved state tracking
   const [savedStateTimestamp, setSavedStateTimestamp] = useState<number | null>(null);
@@ -362,6 +368,8 @@ export default function Playground() {
           // Prefer logits over binarized mask for higher quality refinement
           maskLogits: currentMask.low_res_logits_base64 || undefined,
           maskInput: currentMask.low_res_logits_base64 ? undefined : currentMask.mask_base64,
+          // Send doc_id for debug logging
+          docId: selectedDocId || undefined,
         });
 
         setMaskCandidates(result.masks);
@@ -455,6 +463,9 @@ export default function Playground() {
     // Clear mask input for refinement (both binarized and logits)
     setMaskInputBase64(null);
     setMaskLogitsBase64(null);
+    // Clear similar regions
+    setSimilarRegions([]);
+    setSelectedSimilarIndex(null);
     // Clear any error
     setError(null);
     // Clear saved state timestamp indicator
@@ -466,6 +477,66 @@ export default function Playground() {
     // Close confirmation dialog
     setShowClearConfirm(false);
   }, [selectedDocId]);
+
+  // Find Similar handler
+  const handleFindSimilar = useCallback(async () => {
+    const selectedMask = maskCandidates[selectedMaskIndex];
+    if (!selectedMask || !imageUrl || !selectedDocId) return;
+
+    setIsFindingSimilar(true);
+    setSimilarRegions([]);
+    setSelectedSimilarIndex(null);
+
+    try {
+      const response = await api.segmentFindSimilar(
+        imageUrl,
+        selectedMask.mask_base64,
+        {
+          exemplarBbox: selectedMask.bbox as [number, number, number, number],
+          maxResults: 10,
+          docId: selectedDocId,
+        }
+      );
+
+      setSimilarRegions(response.regions);
+
+      if (response.regions.length > 0) {
+        console.log(
+          `Found ${response.regions.length} similar regions in ${response.processing_time_ms.toFixed(0)}ms`
+        );
+      } else {
+        console.log('No similar regions found');
+      }
+    } catch (err) {
+      console.error('Find similar failed:', err);
+      setError(err instanceof Error ? err.message : 'Find similar failed');
+    } finally {
+      setIsFindingSimilar(false);
+    }
+  }, [maskCandidates, selectedMaskIndex, imageUrl, selectedDocId]);
+
+  // Handle selecting a similar region
+  const handleSelectSimilarRegion = useCallback(
+    (index: number) => {
+      if (index < 0 || index >= similarRegions.length) return;
+
+      setSelectedSimilarIndex(index);
+
+      // Convert similar region to mask candidate format for display
+      const region = similarRegions[index];
+      const asMaskCandidate: MaskCandidate = {
+        mask_base64: region.mask_base64,
+        iou_score: region.iou_score ?? region.similarity_score,
+        bbox: region.bbox,
+        low_res_logits_base64: region.low_res_logits_base64,
+      };
+
+      // Add to mask candidates for selection/refinement
+      setMaskCandidates([asMaskCandidate]);
+      setSelectedMaskIndex(0);
+    },
+    [similarRegions]
+  );
 
   // Run interactive segmentation for points/box modes
   const handleRunInteractive = useCallback(async () => {
@@ -519,8 +590,19 @@ export default function Playground() {
         options.maskInput = maskInputBase64;
       }
 
+      // Validate that at least one prompt type is provided
+      if (!options.points && !options.box && !options.boxes) {
+        setError('Add points or draw a box to segment');
+        setRunning(false);
+        return;
+      }
+
       // Call unified interactive segmentation API
-      const result = await api.segmentInteractive(imageUrl, options);
+      const result = await api.segmentInteractive(imageUrl, {
+        ...options,
+        // Send doc_id for debug logging
+        docId: selectedDocId || undefined,
+      });
       setMaskCandidates(result.masks);
       setSelectedMaskIndex(0);
       // Clear "restored from" indicator since we have new results
@@ -1133,6 +1215,11 @@ export default function Playground() {
                   // Could trigger save/export action here
                 }}
                 isRunning={running}
+                onFindSimilar={handleFindSimilar}
+                isFindingSimilar={isFindingSimilar}
+                similarRegions={similarRegions}
+                onSelectSimilarRegion={handleSelectSimilarRegion}
+                selectedSimilarIndex={selectedSimilarIndex}
               />
             )}
           </div>

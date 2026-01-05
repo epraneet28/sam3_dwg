@@ -61,7 +61,10 @@ export function useSmartSelect(options: UseSmartSelectOptions = {}): UseSmartSel
   // Core state
   const [selectState, setSelectState] = useState<SmartSelectState>('idle');
   const [outputMode, setOutputMode] = useState<SmartSelectOutputMode>('pixels');
-  const [polygonComplexity, setPolygonComplexityState] = useState(0.5);
+  // NOTE: Changed default to 1.0 for maximum fidelity (no simplification).
+  // This ensures polygon mode matches pixel mode as closely as possible.
+  // Users can still use the slider to simplify if needed.
+  const [polygonComplexity, setPolygonComplexityState] = useState(1.0);
 
   // Current data
   const [currentMask, setCurrentMask] = useState<MaskCandidate | null>(null);
@@ -89,12 +92,22 @@ export function useSmartSelect(options: UseSmartSelectOptions = {}): UseSmartSel
     extractPolygonsFromMask(currentMask.mask_base64, polygonComplexity)
       .then((polygons) => {
         if (!cancelled && polygons.length > 0) {
-          // Use the largest polygon (main contour)
+          // Find the largest polygon for primary contour (backwards compatibility)
           const largest = polygons.reduce((a, b) => (a.area > b.area ? a : b));
+          // Keep ALL contours including disjoint regions (grid bubbles, annotations)
+          const allContours = polygons.map(p => ({
+            points: p.points,
+            area: p.area,
+            perimeter: p.perimeter,
+          }));
+          const totalArea = polygons.reduce((sum, p) => sum + p.area, 0);
+
           setCurrentPolygon({
             points: largest.points,
             area: largest.area,
             perimeter: largest.perimeter,
+            allContours,
+            totalArea,
           });
         }
       })
