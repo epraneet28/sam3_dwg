@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Union
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -187,7 +188,7 @@ class DrawingSegmenter:
                             # Get bounding box (already in [x1, y1, x2, y2] format and original image coords)
                             box = pred_boxes[idx]
                             if isinstance(box, torch.Tensor):
-                                box = box.cpu().numpy()
+                                box = box.float().cpu().numpy()  # bfloat16→float32
 
                             bbox = [float(box[0]), float(box[1]), float(box[2]), float(box[3])]
 
@@ -197,7 +198,8 @@ class DrawingSegmenter:
                                 mask = pred_masks[idx]
                                 if isinstance(mask, torch.Tensor):
                                     # Mask shape is (1, H, W), squeeze to (H, W)
-                                    mask = mask.squeeze(0).cpu().numpy()
+                                    # Convert to float32 first (SAM3 may output bfloat16)
+                                    mask = mask.squeeze(0).float().cpu().numpy()
                                 mask_b64 = encode_mask_to_base64(mask)
 
                             # Get crop if requested
@@ -449,307 +451,146 @@ class DrawingSegmenter:
         return self._exemplars.get(zone_type, [])
 
     # =========================================================================
-    # Find Similar Methods
+    # Find Similar - SAM3 Native Exemplar Detection
     # =========================================================================
 
-    def extract_region_features(
-        self,
-        inference_state: dict,
-        bbox: tuple[float, float, float, float],
-        mask: Optional[np.ndarray] = None,
-        feature_level: int = 1,
-        pool_size: int = 7,
-    ) -> np.ndarray:
-        """
-        Extract SAM3 backbone features for a specific region.
-
-        Args:
-            inference_state: State from processor.set_image() containing backbone_out
-            bbox: Region bounding box [x1, y1, x2, y2] in image coordinates
-            mask: Optional mask to apply within bbox (for masked average pooling)
-            feature_level: FPN level to use (0=highest res, 2=lowest res)
-            pool_size: Output size for RoI pooling
-
-        Returns:
-            Feature vector (1D numpy array, normalized for cosine similarity)
-        """
-        import torch.nn.functional as F
-
-        backbone_out = inference_state.get("backbone_out", {})
-        backbone_fpn = backbone_out.get("backbone_fpn", [])
-
-        if not backbone_fpn or feature_level >= len(backbone_fpn):
-            raise ValueError(
-                f"Feature level {feature_level} not available. "
-                f"backbone_fpn has {len(backbone_fpn)} levels."
-            )
-
-        # Get feature map at requested level
-        # Shape: [1, C, H, W] where H, W are feature map dimensions
-        feat_map = backbone_fpn[feature_level]
-        _, channels, feat_h, feat_w = feat_map.shape
-
-        # Get original image dimensions from inference state
-        orig_h = inference_state.get("original_height", 1024)
-        orig_w = inference_state.get("original_width", 1024)
-
-        # Convert bbox to feature map coordinates
-        x1, y1, x2, y2 = bbox
-        scale_x = feat_w / orig_w
-        scale_y = feat_h / orig_h
-
-        fx1 = int(x1 * scale_x)
-        fy1 = int(y1 * scale_y)
-        fx2 = int(x2 * scale_x)
-        fy2 = int(y2 * scale_y)
-
-        # Clamp to valid range
-        fx1 = max(0, min(fx1, feat_w - 1))
-        fy1 = max(0, min(fy1, feat_h - 1))
-        fx2 = max(fx1 + 1, min(fx2, feat_w))
-        fy2 = max(fy1 + 1, min(fy2, feat_h))
-
-        # Extract region features
-        region_feats = feat_map[:, :, fy1:fy2, fx1:fx2]
-
-        # Apply mask if provided (masked average pooling)
-        if mask is not None and mask.size > 0:
-            # Resize mask to feature map region size
-            y1_int, y2_int = int(y1), int(y2)
-            x1_int, x2_int = int(x1), int(x2)
-            mask_region = mask[y1_int:y2_int, x1_int:x2_int]
-            if mask_region.size > 0:
-                mask_resized = cv2.resize(
-                    mask_region.astype(np.float32),
-                    (fx2 - fx1, fy2 - fy1),
-                    interpolation=cv2.INTER_NEAREST,
-                )
-                mask_tensor = torch.from_numpy(mask_resized).to(feat_map.device)
-                mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-
-                # Apply mask and compute weighted average
-                masked_feats = region_feats * mask_tensor
-                mask_sum = mask_tensor.sum()
-                if mask_sum > 0:
-                    feature_vector = masked_feats.sum(dim=(2, 3)) / mask_sum
-                else:
-                    feature_vector = F.adaptive_avg_pool2d(region_feats, 1).squeeze(-1).squeeze(-1)
-            else:
-                feature_vector = F.adaptive_avg_pool2d(region_feats, 1).squeeze(-1).squeeze(-1)
-        else:
-            # Use adaptive average pooling for uniform pooling
-            pooled = F.adaptive_avg_pool2d(region_feats, pool_size)
-            feature_vector = pooled.mean(dim=(2, 3))  # [1, C]
-
-        # Normalize for cosine similarity
-        feature_vector = F.normalize(feature_vector, p=2, dim=-1)
-
-        return feature_vector.cpu().numpy().flatten()
-
-    def find_similar(
+    def find_similar_native(
         self,
         image: Image.Image,
-        exemplar_mask: np.ndarray,
-        exemplar_bbox: Optional[tuple[float, float, float, float]] = None,
+        exemplar_bbox: tuple[float, float, float, float],
         max_results: int = 10,
-        similarity_threshold: float = 0.7,
-        nms_threshold: float = 0.5,
-        grid_stride: int = 32,
-        scale_factors: Optional[list[float]] = None,
-        feature_level: int = 1,
-    ) -> tuple[list[dict], int, int]:
+        confidence_threshold: float = 0.3,
+        exclude_overlap_threshold: float = 0.5,
+    ) -> tuple[list[dict], int]:
         """
-        Find regions similar to the exemplar mask.
+        Find similar regions using SAM3's native exemplar detection.
+
+        This is the CORRECT approach - SAM3's DETR-based detector has built-in
+        support for visual exemplars via geometric prompts. No custom similarity
+        computation needed.
+
+        How it works:
+        1. Provide exemplar bbox as positive geometric prompt
+        2. SAM3 internally uses "visual" as text prompt (no text needed)
+        3. DETR detector finds ALL similar objects in one forward pass
+        4. Filter out the original exemplar by overlap
+
+        This replaces the custom Per-SAM style dense similarity approach (v1-v5)
+        which incorrectly used FPN features for similarity matching.
 
         Args:
             image: PIL Image to search
-            exemplar_mask: Binary mask of the exemplar region
-            exemplar_bbox: Optional bbox, computed from mask if not provided
-            max_results: Maximum number of results to return
-            similarity_threshold: Minimum cosine similarity (0-1)
-            nms_threshold: IoU threshold for NMS
-            grid_stride: Stride for grid-based scanning
-            scale_factors: List of scale factors to search (relative to exemplar size)
-            feature_level: FPN level for feature extraction
+            exemplar_bbox: Bounding box of exemplar [x1, y1, x2, y2] in pixels
+            max_results: Maximum results to return (excluding exemplar)
+            confidence_threshold: SAM3 detection confidence threshold
+            exclude_overlap_threshold: IoU threshold to exclude exemplar
 
         Returns:
-            Tuple of (results list, regions_scanned, regions_above_threshold)
-            Each result dict has: region_id, bbox, similarity, mask, iou_score, low_res_logits
+            Tuple of (results list, total_detections)
+            Each result has: region_id, bbox, mask, similarity (confidence score)
         """
-        if scale_factors is None:
-            scale_factors = [0.5, 0.75, 1.0, 1.25, 1.5]
-
         img_width, img_height = image.size
-
-        # Compute exemplar bbox from mask if not provided
-        if exemplar_bbox is None:
-            ys, xs = np.where(exemplar_mask > 0)
-            if len(xs) == 0:
-                logger.warning("Empty exemplar mask, cannot find similar")
-                return [], 0, 0
-            exemplar_bbox = (
-                float(xs.min()),
-                float(ys.min()),
-                float(xs.max()),
-                float(ys.max()),
-            )
-
         ex1, ey1, ex2, ey2 = exemplar_bbox
-        exemplar_width = ex2 - ex1
-        exemplar_height = ey2 - ey1
+
+        # Convert bbox from [x1, y1, x2, y2] to normalized [cx, cy, w, h]
+        # SAM3 expects center format normalized to [0, 1]
+        cx = ((ex1 + ex2) / 2) / img_width
+        cy = ((ey1 + ey2) / 2) / img_height
+        w = (ex2 - ex1) / img_width
+        h = (ey2 - ey1) / img_height
+        norm_box = [cx, cy, w, h]
 
         logger.info(
-            f"find_similar: exemplar bbox={exemplar_bbox}, "
-            f"searching {len(scale_factors)} scales with stride={grid_stride}"
+            f"find_similar_native: exemplar bbox={exemplar_bbox}, "
+            f"normalized={norm_box}, confidence={confidence_threshold}"
         )
 
-        # Set image and extract exemplar features
+        # Set image and get backbone features
         inference_state = self.processor.set_image(image)
 
-        # Store original dimensions in state for feature extraction
-        inference_state["original_width"] = img_width
-        inference_state["original_height"] = img_height
+        # Reset any previous prompts
+        self.processor.reset_all_prompts(inference_state)
 
-        exemplar_features = self.extract_region_features(
-            inference_state,
-            exemplar_bbox,
-            mask=exemplar_mask,
-            feature_level=feature_level,
+        # Set confidence threshold
+        self.processor.set_confidence_threshold(confidence_threshold, inference_state)
+
+        # Add exemplar as POSITIVE geometric prompt
+        # SAM3 will automatically use "visual" as text prompt internally
+        inference_state = self.processor.add_geometric_prompt(
+            box=norm_box,
+            label=True,  # Positive prompt = find similar
+            state=inference_state,
         )
 
-        # Scan image with grid at multiple scales
-        candidates = []
-        regions_scanned = 0
+        # Extract results from inference state
+        if "masks" not in inference_state or len(inference_state["masks"]) == 0:
+            logger.info("find_similar_native: no detections found")
+            return [], 0
 
-        for scale in scale_factors:
-            window_w = int(exemplar_width * scale)
-            window_h = int(exemplar_height * scale)
+        masks = inference_state["masks"]  # [N, 1, H, W] boolean
+        boxes = inference_state["boxes"]  # [N, 4] in [x1, y1, x2, y2] pixel coords
+        scores = inference_state["scores"]  # [N] confidence scores
+        masks_logits = inference_state.get("masks_logits")  # [N, 1, H, W] float
 
-            # Skip if window is too small or too large
-            if window_w < 16 or window_h < 16:
-                continue
-            if window_w > img_width * 0.9 or window_h > img_height * 0.9:
-                continue
+        total_detections = len(masks)
+        logger.info(f"find_similar_native: SAM3 returned {total_detections} detections")
 
-            # Scan with grid
-            for y in range(0, img_height - window_h, grid_stride):
-                for x in range(0, img_width - window_w, grid_stride):
-                    # Skip if overlaps significantly with exemplar
-                    candidate_bbox = (float(x), float(y), float(x + window_w), float(y + window_h))
-                    iou_with_exemplar = self._compute_bbox_iou(candidate_bbox, exemplar_bbox)
-                    if iou_with_exemplar > 0.5:
-                        continue  # Skip the exemplar region itself
-
-                    regions_scanned += 1
-
-                    # Extract features for candidate
-                    try:
-                        candidate_features = self.extract_region_features(
-                            inference_state,
-                            candidate_bbox,
-                            feature_level=feature_level,
-                        )
-
-                        # Compute cosine similarity
-                        similarity = float(np.dot(exemplar_features, candidate_features))
-
-                        if similarity >= similarity_threshold:
-                            candidates.append({
-                                "bbox": candidate_bbox,
-                                "similarity": similarity,
-                                "scale": scale,
-                            })
-                    except Exception as e:
-                        logger.debug(f"Feature extraction failed for region {candidate_bbox}: {e}")
-                        continue
-
-        regions_above_threshold = len(candidates)
-        logger.info(
-            f"find_similar: scanned {regions_scanned} regions, "
-            f"found {regions_above_threshold} above threshold {similarity_threshold}"
-        )
-
-        if not candidates:
-            return [], regions_scanned, 0
-
-        # Sort by similarity (best first)
-        candidates.sort(key=lambda c: c["similarity"], reverse=True)
-
-        # Apply NMS
-        kept_candidates = self._apply_bbox_nms(candidates, nms_threshold)
-
-        # Limit results
-        kept_candidates = kept_candidates[:max_results]
-
-        # Run SAM3 segmentation on each kept candidate to get masks
         results = []
-        for i, candidate in enumerate(kept_candidates):
-            bbox = candidate["bbox"]
-            try:
-                masks, iou_scores, bboxes, low_res_logits = self.segment_interactive(
-                    image=image,
-                    box=np.array(bbox),
-                    multimask_output=False,  # Single best mask
-                )
+        for i in range(total_detections):
+            # Get mask and bbox
+            # Note: masks is bool (from >0.5 comparison), others may be bfloat16
+            # Must convert bfloat16 to float32 before .numpy() since numpy doesn't support bfloat16
+            mask = masks[i].squeeze().cpu().numpy()  # [H, W] - bool, no conversion needed
+            bbox = boxes[i].float().cpu().numpy()  # [x1, y1, x2, y2] - bfloat16→float32
+            score = float(scores[i].float().cpu().numpy())  # bfloat16→float32
 
-                if len(masks) > 0:
-                    results.append({
-                        "region_id": f"similar_{i:03d}",
-                        "bbox": bboxes[0],
-                        "similarity": candidate["similarity"],
-                        "mask": masks[0],
-                        "iou_score": iou_scores[0],
-                        "low_res_logits": low_res_logits[0] if low_res_logits else None,
-                    })
-            except Exception as e:
-                logger.warning(f"Segmentation failed for similar region {i}: {e}")
-                continue
+            rx1, ry1, rx2, ry2 = bbox
 
-        logger.info(f"find_similar: returning {len(results)} segmented regions")
-        return results, regions_scanned, regions_above_threshold
+            # Check overlap with exemplar to exclude the exemplar itself
+            # Compute IoU between result bbox and exemplar bbox
+            ix1 = max(ex1, rx1)
+            iy1 = max(ey1, ry1)
+            ix2 = min(ex2, rx2)
+            iy2 = min(ey2, ry2)
 
-    def _compute_bbox_iou(
-        self,
-        box1: tuple[float, float, float, float],
-        box2: tuple[float, float, float, float],
-    ) -> float:
-        """Compute IoU between two bounding boxes."""
-        x1 = max(box1[0], box2[0])
-        y1 = max(box1[1], box2[1])
-        x2 = min(box1[2], box2[2])
-        y2 = min(box1[3], box2[3])
+            if ix2 > ix1 and iy2 > iy1:
+                intersection = (ix2 - ix1) * (iy2 - iy1)
+                exemplar_area = (ex2 - ex1) * (ey2 - ey1)
+                result_area = (rx2 - rx1) * (ry2 - ry1)
+                union = exemplar_area + result_area - intersection
+                iou = intersection / union if union > 0 else 0
 
-        if x2 <= x1 or y2 <= y1:
-            return 0.0
+                if iou > exclude_overlap_threshold:
+                    logger.debug(f"Detection {i} excluded: IoU {iou:.2f} with exemplar")
+                    continue
 
-        intersection = (x2 - x1) * (y2 - y1)
-        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-        union = area1 + area2 - intersection
+            # Get low-res logits if available
+            # masks_logits may be bfloat16, convert to float32 for numpy
+            low_res_logits = None
+            if masks_logits is not None:
+                low_res_logits = masks_logits[i].squeeze().float().cpu().numpy()
 
-        return intersection / union if union > 0 else 0.0
+            results.append({
+                "region_id": f"similar_{len(results):03d}",
+                "bbox": bbox,
+                "mask": mask,
+                "similarity": score,  # SAM3's confidence score
+                "iou_score": score,
+                "low_res_logits": low_res_logits,
+            })
 
-    def _apply_bbox_nms(
-        self,
-        candidates: list[dict],
-        iou_threshold: float,
-    ) -> list[dict]:
-        """Apply Non-Maximum Suppression to candidates."""
-        if len(candidates) <= 1:
-            return candidates
+            if len(results) >= max_results:
+                break
 
-        kept = []
-        for candidate in candidates:
-            should_keep = True
-            for kept_candidate in kept:
-                iou = self._compute_bbox_iou(candidate["bbox"], kept_candidate["bbox"])
-                if iou > iou_threshold:
-                    should_keep = False
-                    break
-            if should_keep:
-                kept.append(candidate)
+        # Sort by confidence (already sorted by SAM3, but ensure)
+        results.sort(key=lambda r: r["similarity"], reverse=True)
 
-        return kept
+        logger.info(
+            f"find_similar_native: returning {len(results)} results "
+            f"(excluded {total_detections - len(results)} as exemplar/low-score)"
+        )
+
+        return results, total_detections
 
     @property
     def is_gpu_available(self) -> bool:

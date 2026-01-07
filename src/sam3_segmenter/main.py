@@ -909,14 +909,18 @@ async def segment_interactive(request: InteractiveSegmentRequest):
 @app.post("/segment/find-similar", response_model=FindSimilarResponse)
 async def segment_find_similar(request: FindSimilarRequest):
     """
-    Find and segment regions similar to an exemplar mask.
+    Find and segment regions similar to an exemplar mask (Per-SAM style).
 
     Given an exemplar mask (from previous segmentation), this endpoint:
-    1. Extracts SAM3 backbone features for the masked region
-    2. Scans the image using a grid-based approach at multiple scales
-    3. Computes cosine similarity with the exemplar features
-    4. Filters by similarity threshold and applies NMS
-    5. Runs SAM3 segmentation on each similar region
+    1. Extracts SAM3 instance features for the masked region
+    2. Computes per-pixel cosine similarity across the entire image
+    3. Finds peaks (local maxima) in the similarity map
+    4. Uses each peak as a point prompt for SAM3 segmentation
+
+    This Per-SAM approach is more accurate than grid-based search because:
+    - It finds similar regions at ANY location, not just grid positions
+    - It explicitly excludes the exemplar region from results
+    - It uses SAM3's instance features designed for visual similarity
 
     Returns separate masks for each similar region, allowing the user
     to select individual objects.
@@ -951,6 +955,8 @@ async def segment_find_similar(request: FindSimilarRequest):
     try:
         # Decode exemplar mask
         import io as io_module
+        import base64
+        import numpy as np
 
         mask_bytes = base64.b64decode(request.exemplar_mask_base64)
         mask_img = Image.open(io_module.BytesIO(mask_bytes)).convert("L")
@@ -973,24 +979,52 @@ async def segment_find_similar(request: FindSimilarRequest):
         )
 
     try:
-        # Run find similar
-        results, regions_scanned, regions_above_threshold = segmenter.find_similar(
+        # Use SAM3's native exemplar detection
+        # SAM3's DETR-based detector has built-in support for finding similar
+        # objects given an exemplar bbox via geometric prompts.
+        logger.info("find_similar: using SAM3 native exemplar detection")
+        results, total_detections = segmenter.find_similar_native(
             image=image,
-            exemplar_mask=exemplar_mask,
             exemplar_bbox=exemplar_bbox,
             max_results=request.max_results,
-            similarity_threshold=request.similarity_threshold,
-            nms_threshold=request.nms_threshold,
-            grid_stride=request.grid_stride,
-            scale_factors=settings.find_similar_scale_factors,
-            feature_level=settings.find_similar_feature_level,
+            confidence_threshold=settings.find_similar_confidence_threshold,
+            exclude_overlap_threshold=settings.find_similar_exclude_overlap_threshold,
         )
+        regions_scanned = total_detections
+        regions_above_threshold = len(results)
 
         # Convert results to response format
+        # Apply same post-processing as Smart Select for consistent mask quality
         regions = []
         for result in results:
-            # Encode mask to base64 PNG
             mask = result["mask"]
+
+            # Apply Find Similar-specific post-processing (independent of Smart Select precision mode)
+            # Find Similar is a discovery feature that benefits from cleaner masks
+            if settings.find_similar_enable_postprocessing:
+                if settings.enable_drawing_mode:
+                    # Drawing-specific post-processing (keeps largest, fills holes)
+                    mask = postprocess_mask_for_drawings(
+                        mask,
+                        keep_largest=settings.find_similar_keep_largest,
+                        fill_holes=settings.find_similar_fill_holes,
+                        min_area_ratio=settings.drawing_min_area_ratio,
+                        fill_method="morphological",  # Use morphological, not box_fill
+                        morphology_kernel=settings.drawing_morphology_kernel,
+                        box=None,  # No box constraint for Find Similar
+                    )
+                elif settings.enable_mask_postprocessing:
+                    # Generic post-processing for non-drawing images
+                    mask = postprocess_mask(
+                        mask,
+                        min_component_area=settings.mask_min_component_area,
+                        fill_holes=settings.mask_fill_holes,
+                        max_hole_area=settings.mask_max_hole_area,
+                        apply_morphology=settings.mask_apply_morphology,
+                        kernel_size=settings.mask_morphology_kernel_size,
+                    )
+
+            # Encode mask to base64 PNG
             if mask.dtype == bool:
                 mask_uint8 = (mask * 255).astype(np.uint8)
             else:

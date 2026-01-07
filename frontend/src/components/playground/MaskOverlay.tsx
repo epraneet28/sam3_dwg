@@ -142,7 +142,7 @@ export function MaskOverlay({
     }
 
     ctx.putImageData(imageData, 0, 0);
-  }, [maskImage, imageDimensions, maskColor, maskOpacity]);
+  }, [maskImage, imageDimensions, maskColor, maskOpacity, displayMode]);
 
   if (!mask) return null;
 

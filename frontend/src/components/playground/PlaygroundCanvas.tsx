@@ -64,6 +64,10 @@ interface PlaygroundCanvasProps {
   // Mask result (optional - shown after segmentation)
   selectedMask?: MaskCandidate | null;
 
+  // Exemplar mask (shown alongside selected mask in Find Similar mode)
+  exemplarMask?: MaskCandidate | null;
+  showExemplarMask?: boolean;
+
   // Smart Select features
   displayMode?: SmartSelectOutputMode;
   polygon?: PolygonData | null;
@@ -103,6 +107,8 @@ export function PlaygroundCanvas({
   onAddBox,
   onRemoveBox,
   selectedMask,
+  exemplarMask = null,
+  showExemplarMask = false,
   displayMode = 'pixels',
   polygon = null,
   selectState = 'idle',
@@ -402,6 +408,20 @@ export function PlaygroundCanvas({
               pan={pan}
               containerRef={containerRef}
               onBoxRemove={onRemoveBox}
+            />
+          )}
+
+          {/* Exemplar mask overlay (shown when viewing Find Similar results) */}
+          {(inputMode === 'points' || inputMode === 'box') && showExemplarMask && exemplarMask && (
+            <MaskOverlay
+              mask={exemplarMask}
+              imageDimensions={imageDimensions}
+              zoom={zoom}
+              pan={pan}
+              containerRef={containerRef}
+              displayMode="pixels"
+              maskColor="#10b981" // emerald-500 for exemplar
+              maskOpacity={0.35}
             />
           )}
 

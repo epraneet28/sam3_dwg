@@ -429,8 +429,9 @@ class FindSimilarRequest(BaseModel):
         le=50,
         description="Maximum number of similar regions to return",
     )
+    # FIX: Lowered default from 0.7 to 0.5 to match function default
     similarity_threshold: float = Field(
-        0.7,
+        0.5,
         ge=0.0,
         le=1.0,
         description="Minimum cosine similarity threshold",
@@ -439,13 +440,13 @@ class FindSimilarRequest(BaseModel):
         0.5,
         ge=0.0,
         le=1.0,
-        description="IoU threshold for Non-Maximum Suppression",
+        description="DEPRECATED: No longer used. Dense similarity replaced grid scanning.",
     )
     grid_stride: int = Field(
         32,
         ge=8,
         le=128,
-        description="Stride for grid-based region scanning",
+        description="DEPRECATED: No longer used. Dense similarity replaced grid scanning.",
     )
     doc_id: Optional[str] = Field(
         None,

@@ -45,19 +45,75 @@ const getStorageKey = (docId: string) => `${STORAGE_KEY_PREFIX}${docId}`;
 
 /**
  * Save playground state for a document
+ *
+ * NOTE: Large binary data (masks, logits) are excluded to avoid localStorage quota issues.
+ * Only points, boxes, prompts, and settings are persisted. Users can re-run segmentation
+ * to regenerate masks from saved prompts.
  */
 export function savePlaygroundState(docId: string, state: Omit<PlaygroundState, 'savedAt'>): void {
   if (!docId) return;
 
+  // Exclude large binary data to avoid QuotaExceededError
+  // - maskCandidates contain base64 PNG images (can be several MB each)
+  // - maskInputBase64 and maskLogitsBase64 are also large
+  // Users can re-run segmentation with saved points/boxes to get masks back
   const stateToSave: PlaygroundState = {
     ...state,
+    // Clear large binary data
+    maskCandidates: [],
+    maskInputBase64: null,
+    maskLogitsBase64: null,
+    selectedMaskIndex: 0,
     savedAt: Date.now(),
   };
 
   try {
     localStorage.setItem(getStorageKey(docId), JSON.stringify(stateToSave));
   } catch (error) {
-    console.error('Failed to save playground state:', error);
+    // If still over quota (e.g., many results with zone data), try to free space
+    if (error instanceof DOMException && error.name === 'QuotaExceededError') {
+      console.warn('localStorage quota exceeded, attempting cleanup...');
+      cleanupOldPlaygroundStates(docId);
+
+      // Retry save after cleanup
+      try {
+        localStorage.setItem(getStorageKey(docId), JSON.stringify(stateToSave));
+      } catch (retryError) {
+        console.error('Failed to save playground state after cleanup:', retryError);
+      }
+    } else {
+      console.error('Failed to save playground state:', error);
+    }
+  }
+}
+
+/**
+ * Remove oldest playground states to free up localStorage space
+ */
+function cleanupOldPlaygroundStates(excludeDocId: string): void {
+  const states: { key: string; savedAt: number }[] = [];
+
+  // Collect all playground states with their timestamps
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith(STORAGE_KEY_PREFIX) && key !== getStorageKey(excludeDocId)) {
+      try {
+        const data = JSON.parse(localStorage.getItem(key) || '{}');
+        states.push({ key, savedAt: data.savedAt || 0 });
+      } catch {
+        // Invalid JSON, remove it
+        localStorage.removeItem(key);
+      }
+    }
+  }
+
+  // Sort by savedAt (oldest first) and remove oldest half
+  states.sort((a, b) => a.savedAt - b.savedAt);
+  const toRemove = Math.max(1, Math.ceil(states.length / 2));
+
+  for (let i = 0; i < toRemove && i < states.length; i++) {
+    localStorage.removeItem(states[i].key);
+    console.log(`Removed old playground state: ${states[i].key}`);
   }
 }
 

@@ -372,12 +372,14 @@ export default function Playground() {
           docId: selectedDocId || undefined,
         });
 
-        setMaskCandidates(result.masks);
+        // Sort masks by iou_score descending so highest confidence is first
+        const sortedMasks = [...result.masks].sort((a, b) => b.iou_score - a.iou_score);
+        setMaskCandidates(sortedMasks);
         setSelectedMaskIndex(0);
 
         // Sync with Smart Select
-        if (result.masks.length > 0) {
-          smartSelect.setMask(result.masks[0], newPoints, null);
+        if (sortedMasks.length > 0) {
+          smartSelect.setMask(sortedMasks[0], newPoints, null);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Refinement failed');
@@ -483,9 +485,12 @@ export default function Playground() {
     const selectedMask = maskCandidates[selectedMaskIndex];
     if (!selectedMask || !imageUrl || !selectedDocId) return;
 
+    // Store the exemplar mask so we can restore it when user clicks "Exemplar"
+    setExemplarMask(selectedMask);
+
     setIsFindingSimilar(true);
     setSimilarRegions([]);
-    setSelectedSimilarIndex(null);
+    setSelectedSimilarIndex(-1); // Start with exemplar selected
 
     try {
       const response = await api.segmentFindSimilar(
@@ -515,9 +520,23 @@ export default function Playground() {
     }
   }, [maskCandidates, selectedMaskIndex, imageUrl, selectedDocId]);
 
-  // Handle selecting a similar region
+  // Store the exemplar mask when Find Similar is called
+  const [exemplarMask, setExemplarMask] = useState<MaskCandidate | null>(null);
+
+  // Handle selecting a similar region (or exemplar with index -1)
   const handleSelectSimilarRegion = useCallback(
     (index: number) => {
+      // Handle exemplar selection (index -1)
+      if (index === -1) {
+        setSelectedSimilarIndex(-1);
+        // Restore the exemplar mask
+        if (exemplarMask) {
+          setMaskCandidates([exemplarMask]);
+          setSelectedMaskIndex(0);
+        }
+        return;
+      }
+
       if (index < 0 || index >= similarRegions.length) return;
 
       setSelectedSimilarIndex(index);
@@ -535,7 +554,7 @@ export default function Playground() {
       setMaskCandidates([asMaskCandidate]);
       setSelectedMaskIndex(0);
     },
-    [similarRegions]
+    [similarRegions, exemplarMask]
   );
 
   // Run interactive segmentation for points/box modes
@@ -603,15 +622,17 @@ export default function Playground() {
         // Send doc_id for debug logging
         docId: selectedDocId || undefined,
       });
-      setMaskCandidates(result.masks);
+      // Sort masks by iou_score descending so highest confidence is first
+      const sortedMasks = [...result.masks].sort((a, b) => b.iou_score - a.iou_score);
+      setMaskCandidates(sortedMasks);
       setSelectedMaskIndex(0);
       // Clear "restored from" indicator since we have new results
       setSavedStateTimestamp(null);
 
       // Sync with Smart Select for undo/redo tracking
-      if (result.masks.length > 0) {
+      if (sortedMasks.length > 0) {
         smartSelect.setMask(
-          result.masks[0],
+          sortedMasks[0],
           pointPrompts,
           boxPrompts.length > 0 ? boxPrompts[boxPrompts.length - 1] : null
         );
@@ -788,6 +809,8 @@ export default function Playground() {
               onAddBox={handleAddBox}
               onRemoveBox={handleRemoveBox}
               selectedMask={selectedMask}
+              exemplarMask={exemplarMask}
+              showExemplarMask={similarRegions.length > 0 && selectedSimilarIndex !== -1}
               displayMode={smartSelect.outputMode}
               polygon={smartSelect.currentPolygon}
               selectState={smartSelect.selectState}

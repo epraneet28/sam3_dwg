@@ -78,9 +78,13 @@ def encode_mask_to_base64(
     Returns:
         Base64 encoded PNG string
     """
-    # Handle torch tensors
+    # Handle torch tensors (convert bfloat16→float32 if needed)
     if hasattr(mask, "cpu"):
-        mask = mask.cpu().numpy()
+        # Check if it's a floating-point tensor (not boolean)
+        if hasattr(mask, "is_floating_point") and mask.is_floating_point():
+            mask = mask.float().cpu().numpy()
+        else:
+            mask = mask.cpu().numpy()
 
     # Ensure 2D
     if mask.ndim > 2:
@@ -201,7 +205,11 @@ def create_composite_visualization(
 
     for mask, color in zip(masks, colors):
         if hasattr(mask, "cpu"):
-            mask = mask.cpu().numpy()
+            # Check if it's a floating-point tensor (not boolean)
+            if hasattr(mask, "is_floating_point") and mask.is_floating_point():
+                mask = mask.float().cpu().numpy()
+            else:
+                mask = mask.cpu().numpy()
         if mask.ndim > 2:
             mask = mask.squeeze()
 

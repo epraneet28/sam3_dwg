@@ -184,7 +184,10 @@ export const api = {
         exemplar_mask_base64: maskData,
         exemplar_bbox: options?.exemplarBbox,
         max_results: options?.maxResults ?? 10,
-        similarity_threshold: options?.similarityThreshold ?? 0.7,
+        // FIX: Lowered from 0.7 to 0.5 to match find_similar_dense() default.
+        // Raw cosine similarity for similar regions is often 0.60-0.75 before
+        // region-averaging, which drops it further. 0.7 was too aggressive.
+        similarity_threshold: options?.similarityThreshold ?? 0.5,
         doc_id: options?.docId,
       }
     );

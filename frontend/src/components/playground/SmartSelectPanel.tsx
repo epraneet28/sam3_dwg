@@ -343,10 +343,27 @@ export function SmartSelectPanel({
                 Similar Regions
               </label>
               <span className="text-xs text-purple-400">
-                {similarRegions.length} found
+                {similarRegions.length + 1} total
               </span>
             </div>
-            <div className="space-y-1 max-h-40 overflow-y-auto">
+            <div className="space-y-1 max-h-48 overflow-y-auto">
+              {/* Exemplar (Region 0) - Always shown first and pinned */}
+              <button
+                onClick={() => onSelectSimilarRegion?.(-1)}
+                className={`w-full flex items-center justify-between px-2 py-1.5 rounded text-xs transition-colors border ${
+                  selectedSimilarIndex === null || selectedSimilarIndex === -1
+                    ? 'bg-emerald-600 text-white border-emerald-500'
+                    : 'bg-slate-700/50 text-slate-400 hover:bg-slate-700 hover:text-white border-emerald-500/30'
+                }`}
+              >
+                <span className="flex items-center gap-1.5">
+                  <span className="w-4 h-4 bg-emerald-500/30 rounded-sm flex items-center justify-center text-[10px]">✓</span>
+                  Exemplar
+                </span>
+                <span className="font-mono text-emerald-300">100%</span>
+              </button>
+
+              {/* Similar regions (Region 1, 2, ...) */}
               {similarRegions.map((region, idx) => (
                 <button
                   key={region.region_id}

@@ -220,7 +220,11 @@ def bbox_from_mask(mask: np.ndarray) -> Optional[list[float]]:
         Bounding box [x1, y1, x2, y2] or None if mask is empty
     """
     if hasattr(mask, "cpu"):
-        mask = mask.cpu().numpy()
+        # Check if it's a floating-point tensor (not boolean) - bfloat16→float32
+        if hasattr(mask, "is_floating_point") and mask.is_floating_point():
+            mask = mask.float().cpu().numpy()
+        else:
+            mask = mask.cpu().numpy()
 
     if mask.ndim > 2:
         mask = mask.squeeze()

@@ -176,25 +176,22 @@ class Settings(BaseSettings):
     candidate_union_topk: int = 2             # Number of top candidates to merge (2-3)
 
     # ==========================================================================
-    # Find Similar Settings
+    # FIND SIMILAR
     # ==========================================================================
-    # Enables "Find Similar" feature that searches for objects similar to a
-    # selected region using SAM3's backbone feature embeddings.
+    # Uses SAM3's built-in exemplar detection via geometric prompts.
+    # SAM3's DETR-based detector has native support for finding visually
+    # similar objects given an exemplar bbox - no custom similarity needed.
 
     enable_find_similar: bool = True
 
-    # Search parameters
-    find_similar_default_threshold: float = 0.7    # Cosine similarity threshold
-    find_similar_max_results: int = 10             # Maximum results to return
-    find_similar_grid_stride: int = 32             # Grid stride for scanning
-    find_similar_nms_threshold: float = 0.5        # NMS IoU threshold
+    # Detection thresholds
+    find_similar_confidence_threshold: float = 0.3    # SAM3 detection confidence
+    find_similar_exclude_overlap_threshold: float = 0.5  # IoU to exclude exemplar
 
-    # Feature extraction settings
-    find_similar_feature_level: int = 1            # FPN level (0=288x288, 1=144x144, 2=72x72)
-    find_similar_pool_size: int = 7                # RoI pooling output size
-
-    # Scale search: check multiple scales relative to exemplar
-    find_similar_scale_factors: list[float] = [0.5, 0.75, 1.0, 1.25, 1.5]
+    # Post-processing (cleaner masks for discovery feature)
+    find_similar_enable_postprocessing: bool = True
+    find_similar_keep_largest: bool = True
+    find_similar_fill_holes: bool = True
 
     # Document storage directory (for uploaded images)
     documents_dir: str = "./storage"
